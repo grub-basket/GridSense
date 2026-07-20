@@ -1,0 +1,19 @@
+{
+  "name": "gridsense",
+  "version": "0.1.6",
+  "private": true,
+  "description": "Excel-grade grid over notes' frontmatter for Obsidian",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production",
+    "typecheck": "tsc --noEmit",
+    "deploy:files": "node scripts/deploy.mjs",
+    "deploy": "npm run build && npm run deploy:files"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "esbuild": "^0.21.0",
+    "obsidian": "latest",
+    "typescript": "^5.4.0"
+  }
+}
