@@ -296,3 +296,35 @@ td.gridsense-active {
 .gridsense-col-formula {
   background: color-mix(in srgb, var(--interactive-accent) 6%, transparent);
 }
+
+/* --------------------------- footer: new note + Σ ------------------------ */
+
+.gridsense-table tfoot td {
+  position: sticky;
+  bottom: 0;
+  background: var(--background-secondary);
+  z-index: 2;
+  border: 1px solid var(--background-modifier-border);
+  padding: 3px 8px;
+}
+
+.gridsense-newrow td {
+  bottom: calc(1.9em + 6px);
+}
+
+.gridsense-newnote {
+  width: 100%;
+  border: none;
+  background: transparent;
+  font: inherit;
+  outline: none;
+  color: var(--text-muted);
+}
+
+.gridsense-summary td {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

@@ -21,6 +21,10 @@ import { evaluateFormulas } from "./formulas";
 
 export const GRID_VIEW_TYPE = "gridsense-grid";
 
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
 const DEFAULT_LIMIT = 2000;
 const MIN_COL_PX = 60;
 const MAX_COL_PX = 340;
@@ -215,6 +219,22 @@ export class GridView extends ItemView {
       if (!cfg.hidden.includes(p)) this.cols.push({ kind: "prop", key: p });
     for (const f of cfg.formulas ?? []) this.cols.push({ kind: "formula", key: f.name });
     for (const h of cfg.headingColumns) this.cols.push({ kind: "heading", key: h });
+    // User-defined column order (drag headers): listed colIds first, in order;
+    // anything unlisted keeps its natural position after them. File stays first.
+    const order = cfg.order ?? [];
+    if (order.length) {
+      const rank = new Map(order.map((id, i) => [id, i]));
+      const rest = this.cols.slice(1);
+      rest.sort((a, b) => {
+        const ra = rank.get(colId(a));
+        const rb = rank.get(colId(b));
+        if (ra !== undefined && rb !== undefined) return ra - rb;
+        if (ra !== undefined) return -1;
+        if (rb !== undefined) return 1;
+        return 0;
+      });
+      this.cols = [this.cols[0], ...rest];
+    }
 
     // View pipeline: filter → sort → limit.
     let rows = this.store.rows.slice();
@@ -312,10 +332,24 @@ export class GridView extends ItemView {
     hr.createEl("th", { cls: "gridsense-rownum", text: "#" });
     const sort = this.cfg().sort;
     this.cols.forEach((c, ci) => {
+      const shown = c.kind === "prop" ? this.cfg().rename?.[c.key] ?? c.key : c.key;
       const label =
-        c.kind === "heading" ? `# ${c.key}` : c.kind === "formula" ? `ƒ ${c.key}` : c.key;
+        c.kind === "heading" ? `# ${shown}` : c.kind === "formula" ? `ƒ ${shown}` : shown;
       const th = hr.createEl("th", { cls: `gridsense-col-${c.kind}` });
+      if (c.kind !== "file") {
+        th.draggable = true;
+        th.addEventListener("dragstart", (e) => {
+          e.dataTransfer?.setData("text/gridsense-col", colId(c));
+        });
+        th.addEventListener("dragover", (e) => e.preventDefault());
+        th.addEventListener("drop", (e) => {
+          e.preventDefault();
+          const dragged = e.dataTransfer?.getData("text/gridsense-col");
+          if (dragged && dragged !== colId(c)) void this.moveColumn(dragged, colId(c));
+        });
+      }
       th.createSpan({ text: label });
+      if (c.kind === "prop" && shown !== c.key) th.setAttr("title", `Property: ${c.key}`);
       if (sort && sort.key === c.key)
         th.createSpan({ cls: "gridsense-sort-ind", text: sort.dir === "asc" ? " ▲" : " ▼" });
       if (c.kind === "heading" || c.kind === "formula") {
@@ -328,7 +362,10 @@ export class GridView extends ItemView {
         });
       }
       if (c.kind === "prop") {
-        th.setAttr("title", "Click to select column · right-click for sort & options");
+        th.setAttr(
+          "title",
+          `Property: ${c.key} · click to select · right-click for sort & options · drag to reorder`
+        );
         const x = th.createSpan({ cls: "gridsense-remove-col", text: "×" });
         x.setAttr("title", `Hide column "${c.key}" (restore via ▦ columns)`);
         x.addEventListener("click", (e) => {
@@ -347,7 +384,78 @@ export class GridView extends ItemView {
     this.winStart = -1;
     this.winEnd = -1;
     this.renderWindow(true);
+    this.buildFooter(table);
     scroller.scrollTop = prevScroll;
+  }
+
+  /** Sticky footer: Σ/avg for numeric columns, filled-count otherwise, plus a
+   * new-note row (type a name, Enter creates it in this folder). */
+  private buildFooter(table: HTMLElement) {
+    const tfoot = table.createEl("tfoot");
+
+    const newTr = tfoot.createEl("tr", { cls: "gridsense-newrow" });
+    newTr.createEl("td", { cls: "gridsense-rownum", text: "＋" });
+    const newTd = newTr.createEl("td", {
+      attr: { colspan: String(this.cols.length) },
+    });
+    const input = newTd.createEl("input", {
+      cls: "gridsense-newnote",
+      type: "text",
+      attr: { placeholder: "new note name — Enter creates it here…" },
+    });
+    input.addEventListener("keydown", async (e) => {
+      e.stopPropagation();
+      if (e.key !== "Enter") return;
+      const name = input.value.trim().replace(/[\\/:]+/g, "-");
+      if (!name) return;
+      const path = `${this.folder ? this.folder + "/" : ""}${name}.md`;
+      if (this.app.vault.getAbstractFileByPath(path)) {
+        new Notice("GridSense: a note with that name already exists here");
+        return;
+      }
+      try {
+        await this.app.vault.create(path, "---\n---\n");
+        input.value = "";
+        new Notice(`GridSense: created "${name}"`);
+      } catch (err) {
+        new Notice(`GridSense: could not create note: ${String(err)}`);
+      }
+    });
+
+    const sumTr = tfoot.createEl("tr", { cls: "gridsense-summary" });
+    sumTr.createEl("td", { cls: "gridsense-rownum", text: "Σ" });
+    for (const c of this.cols) {
+      const td = sumTr.createEl("td");
+      if (c.kind === "file") {
+        td.setText(`${this.viewRows.length}`);
+        td.setAttr("title", "Row count");
+        continue;
+      }
+      let filled = 0;
+      let numeric = 0;
+      let sum = 0;
+      for (const r of this.viewRows) {
+        const v =
+          c.kind === "heading"
+            ? r.headings[c.key]
+            : c.kind === "formula"
+              ? r.formulas?.[c.key]
+              : r.fm[c.key];
+        if (v === undefined || v === null || v === "") continue;
+        filled++;
+        if (typeof v === "number") {
+          numeric++;
+          sum += v;
+        }
+      }
+      if (numeric > 0 && numeric >= filled / 2) {
+        const avg = sum / numeric;
+        td.setText(`Σ ${round2(sum)} · ø ${round2(avg)}`);
+        td.setAttr("title", `Sum and average of ${numeric} numbers`);
+      } else if (filled) {
+        td.setText(`${filled} filled`);
+      }
+    }
   }
 
   private onScroll() {
@@ -518,6 +626,11 @@ export class GridView extends ItemView {
       menu.addSeparator();
       menu.addItem((i) =>
         i.setTitle(`Hide column "${c.key}"`).setIcon("eye-off").onClick(() => void this.hideColumn(c.key))
+      );
+      menu.addItem((i) =>
+        i.setTitle("Rename display name…").setIcon("pencil").onClick(() => {
+          new RenameColumnModal(this, c.key).open();
+        })
       );
     }
     menu.addSeparator();
@@ -957,6 +1070,33 @@ export class GridView extends ItemView {
 
   // ---------------------------------------------------------------- columns
 
+  /** Reorder: place dragged column at the target's position. */
+  async moveColumn(draggedId: string, targetId: string) {
+    const ids = this.cols.slice(1).map((c) => colId(c));
+    const from = ids.indexOf(draggedId);
+    const to = ids.indexOf(targetId);
+    if (from === -1 || to === -1) return;
+    ids.splice(to, 0, ...ids.splice(from, 1));
+    this.cfg().order = ids;
+    await this.plugin.saveSettings();
+    await this.render();
+  }
+
+  /** Re-create the store (fresh event wiring + full recompile). Used when
+   * heading columns change out from under it, e.g. applying a named view. */
+  reattachStore() {
+    this.attachStore();
+  }
+
+  async renameColumn(key: string, display: string) {
+    const cfg = this.cfg();
+    cfg.rename = cfg.rename ?? {};
+    if (display && display !== key) cfg.rename[key] = display;
+    else delete cfg.rename[key];
+    await this.plugin.saveSettings();
+    await this.render();
+  }
+
   async hideColumn(key: string) {
     const cfg = this.cfg();
     if (!cfg.hidden.includes(key)) cfg.hidden.push(key);
@@ -1235,6 +1375,7 @@ class ColumnsModal extends Modal {
             const v = views[n];
             Object.assign(cfg, structuredClone(v), { views: cfg.views });
             await this.view.plugin.saveSettings();
+            this.view.reattachStore(); // heading columns may differ — recompile
             await this.view.refresh();
             this.renderBody();
             new Notice(`GridSense: applied view "${n}"`);
@@ -1348,6 +1489,41 @@ class ColumnsModal extends Modal {
           }
         });
       });
+  }
+}
+
+class RenameColumnModal extends Modal {
+  constructor(private view: GridView, private key: string) {
+    super(view.app);
+  }
+
+  onOpen() {
+    this.titleEl.setText(`Display name for "${this.key}"`);
+    let value = this.view.plugin.folderConfig(this.view.scopeFolder()).rename?.[this.key] ?? "";
+    new Setting(this.contentEl)
+      .setName("Shown as")
+      .setDesc("Display only — the frontmatter property keeps its real name. Empty resets.")
+      .addText((t) => {
+        t.setValue(value);
+        t.setPlaceholder(this.key);
+        t.onChange((v) => (value = v));
+        window.setTimeout(() => t.inputEl.focus(), 0);
+        t.inputEl.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") {
+            this.close();
+            void this.view.renameColumn(this.key, value.trim());
+          }
+        });
+      });
+    new Setting(this.contentEl).addButton((b) =>
+      b
+        .setButtonText("Save")
+        .setCta()
+        .onClick(() => {
+          this.close();
+          void this.view.renameColumn(this.key, value.trim());
+        })
+    );
   }
 }
 

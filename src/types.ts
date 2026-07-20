@@ -74,6 +74,10 @@ export interface FolderConfig {
   wrap?: boolean;
   limit?: number;
   formulas?: FormulaSpec[];
+  /** Display order of columns (colIds); unlisted columns keep natural order. */
+  order?: string[];
+  /** Display-name overrides for property columns (key → shown name). */
+  rename?: Record<string, string>;
   /** Named snapshots of this config, applied via the columns manager. */
   views?: Record<string, Omit<FolderConfig, "views">>;
 }
