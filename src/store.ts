@@ -13,7 +13,15 @@ export class GridStore {
   rows: Row[] = [];
   propColumns: string[] = [];
   private dirty = true;
+  private compiling = false;
   private detachFns: (() => void)[] = [];
+
+  get isDirty(): boolean {
+    return this.dirty;
+  }
+  get isEmpty(): boolean {
+    return this.rows.length === 0 && this.propColumns.length === 0;
+  }
 
   constructor(
     private app: App,
@@ -71,8 +79,48 @@ export class GridStore {
     return out.sort((a, b) => a.path.localeCompare(b.path));
   }
 
+  /**
+   * Instant first paint: rebuild rows from the persisted JSON snapshot (the
+   * on-disk database) without touching every file. Leaves the store dirty so
+   * a real compile follows in the background.
+   */
+  async loadSnapshot(): Promise<boolean> {
+    try {
+      const dir = normalizePath(`${this.app.vault.configDir}/plugins/gridsense/db`);
+      const slug =
+        this.folderPath.replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "vault";
+      const p = normalizePath(`${dir}/${slug}.json`);
+      if (!(await this.app.vault.adapter.exists(p))) return false;
+      const payload = JSON.parse(await this.app.vault.adapter.read(p)) as {
+        columns: string[];
+        rows: { path: string; fm: Record<string, unknown>; headings: Record<string, string> }[];
+      };
+      const rows: Row[] = [];
+      for (const r of payload.rows ?? []) {
+        const file = this.app.vault.getAbstractFileByPath(r.path);
+        if (file instanceof TFile) rows.push({ file, fm: r.fm ?? {}, headings: r.headings ?? {} });
+      }
+      if (!rows.length) return false;
+      this.rows = rows;
+      this.propColumns = payload.columns ?? [];
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async compile(): Promise<void> {
     if (!this.dirty && this.rows.length) return;
+    if (this.compiling) return;
+    this.compiling = true;
+    try {
+      await this.compileInner();
+    } finally {
+      this.compiling = false;
+    }
+  }
+
+  private async compileInner(): Promise<void> {
     const files = this.files();
     const counts = new Map<string, number>();
     const rows: Row[] = [];

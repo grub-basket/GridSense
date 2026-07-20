@@ -7,6 +7,7 @@ import {
   Notice,
   Setting,
   TFile,
+  TFolder,
   WorkspaceLeaf,
   debounce,
 } from "obsidian";
@@ -15,9 +16,15 @@ import { GridStore } from "./store";
 import { EditEngine, parseInput, valueToDisplay } from "./edits";
 import { allHeadings } from "./headings";
 import { HistoryLogModal, appendHistory, readHistory } from "./history-log";
-import { CellRef, ColumnSpec } from "./types";
+import { CellRef, ColumnSpec, FolderConfig, FormulaSpec, Row, colId } from "./types";
+import { evaluateFormulas } from "./formulas";
 
 export const GRID_VIEW_TYPE = "gridsense-grid";
+
+const DEFAULT_LIMIT = 2000;
+const MIN_COL_PX = 60;
+const MAX_COL_PX = 340;
+const ROW_BUFFER = 20;
 
 interface GridViewState {
   folder: string;
@@ -29,14 +36,24 @@ export class GridView extends ItemView {
   private store: GridStore | null = null;
   private engine: EditEngine;
   private cols: ColumnSpec[] = [];
+  /** Filtered + sorted + limited rows currently backing the grid. */
+  private viewRows: Row[] = [];
+  private truncated = 0;
   private anchor: CellRef | null = null;
   private head: CellRef | null = null;
   private editing = false;
   private tableEl: HTMLElement | null = null;
+  private tbodyEl: HTMLElement | null = null;
+  private scrollerEl: HTMLElement | null = null;
+  private toolbarEl: HTMLElement | null = null;
   private statusEl: HTMLElement | null = null;
   private pendingEl: HTMLElement | null = null;
   private pendingWhileEditing = false;
+  private rowH = 27;
+  private winStart = 0;
+  private winEnd = 0;
   private requestRender = debounce(() => void this.render(), 150, true);
+  private saveDebounced = debounce(() => void this.plugin.saveSettings(), 800, true);
 
   constructor(leaf: WorkspaceLeaf, readonly plugin: GridSensePlugin) {
     super(leaf);
@@ -62,9 +79,20 @@ export class GridView extends ItemView {
   async setState(state: GridViewState, result: unknown): Promise<void> {
     this.folder = state?.folder ?? "";
     this.attachStore();
+    this.buildChrome();
+    // Paint instantly from the on-disk snapshot, then compile for real.
+    if (this.store!.isEmpty) await this.store!.loadSnapshot();
     await this.render();
     // @ts-expect-error obsidian's setState signature varies across versions
     return super.setState(state, result);
+  }
+
+  private cfg(): FolderConfig {
+    return this.plugin.folderConfig(this.folder);
+  }
+
+  private get rows(): Row[] {
+    return this.viewRows;
   }
 
   private attachStore() {
@@ -72,10 +100,9 @@ export class GridView extends ItemView {
     this.store = new GridStore(
       this.app,
       this.folder,
-      () => this.plugin.folderConfig(this.folder).headingColumns,
+      () => this.cfg().headingColumns,
       () => {
         if (this.editing) {
-          // Don't yank the cell editor away — flag it and refresh on commit.
           this.pendingWhileEditing = true;
           this.pendingEl?.show();
         } else {
@@ -85,7 +112,6 @@ export class GridView extends ItemView {
     );
   }
 
-  /** Called when a cell editor closes: run the refresh we held back. */
   private flushPendingRefresh() {
     if (!this.pendingWhileEditing) return;
     this.pendingWhileEditing = false;
@@ -103,21 +129,18 @@ export class GridView extends ItemView {
     this.store?.detach();
   }
 
-  // ------------------------------------------------------------------ render
+  // ------------------------------------------------------------------ chrome
 
-  async render() {
-    if (!this.store) return;
-    await this.store.compile();
-    const cfg = this.plugin.folderConfig(this.folder);
-    this.cols = this.store.columns(cfg.hidden);
-    const rows = this.store.rows;
-
+  /** Toolbar + scroller are built once per scope so the filter input keeps
+   * focus across data refreshes (render() only rebuilds the table). */
+  private buildChrome() {
     const content = this.contentEl;
     content.empty();
     content.addClass("gridsense-content");
+    content.tabIndex = 0;
 
-    // Toolbar
     const bar = content.createDiv({ cls: "gridsense-toolbar" });
+    this.toolbarEl = bar;
     bar.createSpan({ cls: "gridsense-scope", text: this.folder || "(vault)" });
     const mkBtn = (label: string, title: string, fn: () => void) => {
       const b = bar.createEl("button", { text: label, attr: { title } });
@@ -125,13 +148,11 @@ export class GridView extends ItemView {
       return b;
     };
     mkBtn("↺", "Recompile from notes", () => {
-      this.store && ((this.store as unknown as { dirty: boolean }).dirty = true);
       this.attachStore();
       void this.render();
     });
-    mkBtn("▦ columns", "Show/hide columns, add heading columns", () => this.openColumnsModal());
-    mkBtn("＋ heading column", "Add a column showing content under a heading", () =>
-      this.addHeadingColumn()
+    mkBtn("▦ columns", "Views, show/hide columns, heading & formula columns", () =>
+      this.openColumnsModal()
     );
     mkBtn("⇅ find & replace", "Find & replace in selection (or whole grid)", () =>
       this.openFindReplace()
@@ -141,6 +162,33 @@ export class GridView extends ItemView {
       const entries = await readHistory(this.app, this.folder);
       new HistoryLogModal(this.app, this.folder, entries).open();
     });
+    const wrapBtn = mkBtn(
+      this.cfg().wrap ? "⏎ wrap: on" : "⏎ wrap: off",
+      "Toggle word wrap for the whole sheet",
+      () => {
+        this.cfg().wrap = !this.cfg().wrap;
+        wrapBtn.setText(this.cfg().wrap ? "⏎ wrap: on" : "⏎ wrap: off");
+        this.saveDebounced();
+        void this.render();
+      }
+    );
+    const filter = bar.createEl("input", {
+      cls: "gridsense-filter",
+      type: "search",
+      attr: { placeholder: "filter rows…" },
+    });
+    filter.value = this.cfg().filter ?? "";
+    const applyFilter = debounce(
+      () => {
+        this.cfg().filter = filter.value;
+        this.saveDebounced();
+        this.requestRender();
+      },
+      200,
+      true
+    );
+    filter.addEventListener("input", applyFilter);
+
     this.pendingEl = bar.createSpan({
       cls: "gridsense-pending",
       text: "⟳ other files in this folder changed — grid refreshes when you finish editing",
@@ -148,82 +196,242 @@ export class GridView extends ItemView {
     this.pendingEl.hide();
     this.statusEl = bar.createSpan({ cls: "gridsense-status" });
 
-    // Table
-    const scroller = content.createDiv({ cls: "gridsense-scroller" });
+    this.scrollerEl = content.createDiv({ cls: "gridsense-scroller" });
+    this.scrollerEl.addEventListener("scroll", () => this.onScroll());
+  }
+
+  // ------------------------------------------------------------------ render
+
+  async render() {
+    if (!this.store || !this.scrollerEl) return;
+    if (this.store.isEmpty) await this.store.compile();
+    else if (this.store.isDirty)
+      void this.store.compile().then(() => this.requestRender());
+
+    const cfg = this.cfg();
+    // Columns: file + visible props + formulas + headings.
+    this.cols = [{ kind: "file", key: "file" }];
+    for (const p of this.store.propColumns)
+      if (!cfg.hidden.includes(p)) this.cols.push({ kind: "prop", key: p });
+    for (const f of cfg.formulas ?? []) this.cols.push({ kind: "formula", key: f.name });
+    for (const h of cfg.headingColumns) this.cols.push({ kind: "heading", key: h });
+
+    // View pipeline: filter → sort → limit.
+    let rows = this.store.rows.slice();
+    const needle = (cfg.filter ?? "").trim().toLowerCase();
+    const specs = cfg.formulas ?? [];
+    if (specs.length) await evaluateFormulas(this.app, specs, rows);
+    if (needle) {
+      rows = rows.filter((r) => {
+        if (r.file.basename.toLowerCase().includes(needle)) return true;
+        for (const c of this.cols) {
+          if (c.kind === "file") continue;
+          const v =
+            c.kind === "heading"
+              ? r.headings[c.key]
+              : c.kind === "formula"
+                ? r.formulas?.[c.key]
+                : valueToDisplay(r.fm[c.key]);
+          if (v && String(v).toLowerCase().includes(needle)) return true;
+        }
+        return false;
+      });
+    }
+    const sort = cfg.sort;
+    if (sort) {
+      const dir = sort.dir === "desc" ? -1 : 1;
+      const val = (r: Row): unknown => {
+        if (sort.key === "file") return r.file.basename;
+        const col = this.cols.find((c) => c.key === sort.key);
+        if (col?.kind === "heading") return r.headings[sort.key] ?? "";
+        if (col?.kind === "formula") return r.formulas?.[sort.key] ?? "";
+        return r.fm[sort.key];
+      };
+      rows.sort((a, b) => {
+        const va = val(a);
+        const vb = val(b);
+        const ea = va === undefined || va === null || va === "";
+        const eb = vb === undefined || vb === null || vb === "";
+        if (ea && eb) return 0;
+        if (ea) return 1; // empties last regardless of direction
+        if (eb) return -1;
+        if (typeof va === "number" && typeof vb === "number") return (va - vb) * dir;
+        return String(valueToDisplay(va)).localeCompare(String(valueToDisplay(vb)), undefined, {
+          numeric: true,
+        }) * dir;
+      });
+    }
+    const limit = cfg.limit ?? DEFAULT_LIMIT;
+    this.truncated = limit > 0 ? Math.max(0, rows.length - limit) : 0;
+    this.viewRows = limit > 0 ? rows.slice(0, limit) : rows;
+
+    this.buildTable();
+    this.paintSelection();
+    const parts = [`${this.viewRows.length} notes`, `${this.cols.length - 1} columns`];
+    if (this.truncated) parts.push(`${this.truncated} beyond limit`);
+    if (needle) parts.push("filtered");
+    this.updateStatus(parts.join(" · "));
+    if (!this.pendingWhileEditing) this.pendingEl?.hide();
+  }
+
+  private colWidth(c: ColumnSpec): number {
+    const saved = this.cfg().widths?.[colId(c)];
+    if (saved) return Math.max(MIN_COL_PX, saved);
+    // Default: content length (sampled), capped so paragraphs don't take over.
+    let maxLen = c.kind === "heading" ? 24 : c.key.length;
+    const sample = this.viewRows.slice(0, 200);
+    for (const r of sample) {
+      const v =
+        c.kind === "file"
+          ? r.file.basename
+          : c.kind === "heading"
+            ? (r.headings[c.key] ?? "").split("\n")[0]
+            : c.kind === "formula"
+              ? (r.formulas?.[c.key] ?? "").split("\n")[0]
+              : valueToDisplay(r.fm[c.key]);
+      if (v && v.length > maxLen) maxLen = Math.min(v.length, 80);
+    }
+    return Math.max(MIN_COL_PX, Math.min(MAX_COL_PX, Math.round(maxLen * 7.2 + 24)));
+  }
+
+  private buildTable() {
+    const scroller = this.scrollerEl!;
+    const prevScroll = scroller.scrollTop;
+    scroller.empty();
     const table = scroller.createEl("table", { cls: "gridsense-table" });
+    if (this.cfg().wrap) table.addClass("gridsense-wrap");
     this.tableEl = table;
+
+    const colgroup = table.createEl("colgroup");
+    colgroup.createEl("col", { attr: { style: "width: 44px" } });
+    for (const c of this.cols)
+      colgroup.createEl("col", { attr: { style: `width: ${this.colWidth(c)}px` } });
+
     const thead = table.createEl("thead");
     const hr = thead.createEl("tr");
     hr.createEl("th", { cls: "gridsense-rownum", text: "#" });
+    const sort = this.cfg().sort;
     this.cols.forEach((c, ci) => {
-      const th = hr.createEl("th", {
-        text: c.kind === "heading" ? `# ${c.key}` : c.key,
-        cls: `gridsense-col-${c.kind}`,
-      });
-      if (c.kind === "heading") {
-        th.setAttr("title", "Content under this heading (click × to remove)");
+      const label =
+        c.kind === "heading" ? `# ${c.key}` : c.kind === "formula" ? `ƒ ${c.key}` : c.key;
+      const th = hr.createEl("th", { cls: `gridsense-col-${c.kind}` });
+      th.createSpan({ text: label });
+      if (sort && sort.key === c.key)
+        th.createSpan({ cls: "gridsense-sort-ind", text: sort.dir === "asc" ? " ▲" : " ▼" });
+      if (c.kind === "heading" || c.kind === "formula") {
         const x = th.createSpan({ cls: "gridsense-remove-col", text: "×" });
+        x.setAttr("title", `Remove ${c.kind} column`);
         x.addEventListener("click", (e) => {
           e.stopPropagation();
-          this.removeHeadingColumn(c.key);
+          if (c.kind === "heading") void this.removeHeadingColumn(c.key);
+          else void this.removeFormulaColumn(c.key);
         });
       }
       if (c.kind === "prop") {
-        th.addEventListener("click", () => this.selectColumn(ci));
-        th.setAttr("title", "Click to select column · right-click for options");
+        th.setAttr("title", "Click to select column · right-click for sort & options");
         const x = th.createSpan({ cls: "gridsense-remove-col", text: "×" });
         x.setAttr("title", `Hide column "${c.key}" (restore via ▦ columns)`);
         x.addEventListener("click", (e) => {
           e.stopPropagation();
           void this.hideColumn(c.key);
         });
-        th.addEventListener("contextmenu", (e) => {
-          e.preventDefault();
-          const menu = new Menu();
-          menu.addItem((i) =>
-            i.setTitle(`Hide column "${c.key}"`).setIcon("eye-off").onClick(() => void this.hideColumn(c.key))
-          );
-          menu.addItem((i) =>
-            i.setTitle("Manage columns…").setIcon("settings-2").onClick(() => this.openColumnsModal())
-          );
-          menu.showAtMouseEvent(e);
-        });
+        th.addEventListener("click", () => this.selectColumn(ci));
       }
+      th.addEventListener("contextmenu", (e) => this.onHeaderContextMenu(e, c));
+      // Drag-resize handle.
+      const grip = th.createSpan({ cls: "gridsense-col-grip" });
+      grip.addEventListener("mousedown", (e) => this.startColResize(e, c, ci));
     });
 
-    const tbody = table.createEl("tbody");
-    rows.forEach((row, ri) => {
-      const tr = tbody.createEl("tr");
-      tr.createEl("td", { cls: "gridsense-rownum", text: String(ri + 1) });
-      this.cols.forEach((c, ci) => {
-        const td = tr.createEl("td", { cls: `gridsense-cell gridsense-col-${c.kind}` });
-        td.dataset.row = String(ri);
-        td.dataset.col = String(ci);
-        this.paintCell(td, ri, ci);
-        td.addEventListener("mousedown", (e) => this.onCellMouseDown(e, ri, ci));
-        td.addEventListener("mouseenter", (e) => this.onCellMouseEnter(e, ri, ci));
-        td.addEventListener("dblclick", () => this.beginEdit(ri, ci));
-        td.addEventListener("contextmenu", (e) => this.onCellContextMenu(e, ri, ci));
-      });
+    this.tbodyEl = table.createEl("tbody");
+    this.winStart = -1;
+    this.winEnd = -1;
+    this.renderWindow(true);
+    scroller.scrollTop = prevScroll;
+  }
+
+  private onScroll() {
+    // Direct call, not requestAnimationFrame: rAF freezes in unfocused
+    // windows (popouts/background panes) and the window diff is cheap.
+    if (!this.tbodyEl) return;
+    this.renderWindow(false);
+  }
+
+  /** Virtualized body: only rows near the viewport exist in the DOM; spacer
+   * rows keep the scrollbar honest. */
+  private renderWindow(force: boolean) {
+    const scroller = this.scrollerEl;
+    const tbody = this.tbodyEl;
+    if (!scroller || !tbody) return;
+    const total = this.viewRows.length;
+    const viewH = scroller.clientHeight || 600;
+    const windowSize = Math.ceil(viewH / this.rowH) + ROW_BUFFER * 2;
+    let start = Math.max(0, Math.floor(scroller.scrollTop / this.rowH) - ROW_BUFFER);
+    start = Math.min(start, Math.max(0, total - windowSize + ROW_BUFFER));
+    const end = Math.min(total, start + windowSize);
+    if (!force && start === this.winStart && end === this.winEnd) return;
+    this.winStart = start;
+    this.winEnd = end;
+    tbody.empty();
+    const spTop = tbody.createEl("tr", { cls: "gridsense-spacer" });
+    spTop.createEl("td", {
+      attr: { colspan: String(this.cols.length + 1), style: `height: ${start * this.rowH}px` },
     });
+    for (let ri = start; ri < end; ri++) this.renderRow(tbody, ri);
+    const spBot = tbody.createEl("tr", { cls: "gridsense-spacer" });
+    spBot.createEl("td", {
+      attr: {
+        colspan: String(this.cols.length + 1),
+        style: `height: ${Math.max(0, total - end) * this.rowH}px`,
+      },
+    });
+    // Refine the row-height estimate from what's actually on screen.
+    const rendered = end - start;
+    if (rendered > 0) {
+      const firstRow = tbody.querySelector("tr:not(.gridsense-spacer)") as HTMLElement | null;
+      if (firstRow && firstRow.offsetHeight > 8) {
+        const measured = firstRow.offsetHeight;
+        if (Math.abs(measured - this.rowH) > 2) {
+          this.rowH = measured;
+          this.renderWindow(true);
+          return;
+        }
+      }
+    }
     this.paintSelection();
-    this.updateStatus(`${rows.length} notes · ${this.cols.length - 1} columns`);
-    content.tabIndex = 0;
+  }
+
+  private renderRow(tbody: HTMLElement, ri: number) {
+    const row = this.viewRows[ri];
+    const tr = tbody.createEl("tr");
+    tr.createEl("td", { cls: "gridsense-rownum", text: String(ri + 1) });
+    this.cols.forEach((c, ci) => {
+      const td = tr.createEl("td", { cls: `gridsense-cell gridsense-col-${c.kind}` });
+      td.dataset.row = String(ri);
+      td.dataset.col = String(ci);
+      this.paintCell(td, ri, ci);
+      td.addEventListener("mousedown", (e) => this.onCellMouseDown(e, ri, ci));
+      td.addEventListener("mouseenter", (e) => this.onCellMouseEnter(e, ri, ci));
+      td.addEventListener("dblclick", () => this.beginEdit(ri, ci));
+      td.addEventListener("contextmenu", (e) => this.onCellContextMenu(e, ri, ci));
+    });
   }
 
   private cellValue(ri: number, ci: number): unknown {
-    const row = this.store!.rows[ri];
+    const row = this.rows[ri];
     const c = this.cols[ci];
     if (!row || !c) return "";
     if (c.kind === "file") return row.file.basename;
     if (c.kind === "heading") return row.headings[c.key] ?? "";
+    if (c.kind === "formula") return row.formulas?.[c.key] ?? "";
     return row.fm[c.key];
   }
 
   private paintCell(td: HTMLElement, ri: number, ci: number) {
     td.empty();
     const c = this.cols[ci];
-    const row = this.store!.rows[ri];
+    const row = this.rows[ri];
+    if (!c || !row) return;
     if (c.kind === "file") {
       const a = td.createEl("a", { text: row.file.basename, cls: "gridsense-filelink" });
       a.addEventListener("click", (e) => {
@@ -238,27 +446,85 @@ export class GridView extends ItemView {
       const hasHeading = (this.app.metadataCache.getFileCache(row.file)?.headings ?? []).some(
         (h) => h.heading.trim().toLowerCase() === c.key.trim().toLowerCase()
       );
-      if (!hasHeading) {
-        td.createDiv({ cls: "gridsense-heading-preview", text });
-        return;
+      if (hasHeading) {
+        const link = td.createEl("a", {
+          cls: "gridsense-heading-link",
+          text: this.plugin.settings.showHeadingNames ? c.key : "↳",
+        });
+        link.setAttr("title", `Open ${row.file.basename} at "${c.key}"`);
+        link.addEventListener("click", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          void this.app.workspace.openLinkText(
+            `${row.file.path}#${c.key}`,
+            "",
+            e.metaKey || e.ctrlKey
+          );
+        });
       }
-      const link = td.createEl("a", { cls: "gridsense-heading-link", text: `↳ ${c.key}` });
-      link.setAttr("title", `Open ${row.file.basename} at "${c.key}"`);
-      link.addEventListener("click", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        void this.app.workspace.openLinkText(
-          `${row.file.path}#${c.key}`,
-          "",
-          e.metaKey || e.ctrlKey
-        );
-      });
+      td.createDiv({ cls: "gridsense-heading-preview", text });
+      return;
+    }
+    if (c.kind === "formula") {
       td.createDiv({ cls: "gridsense-heading-preview", text });
       return;
     }
     td.setText(text);
     if (typeof v === "boolean") td.addClass("gridsense-bool");
     if (typeof v === "number") td.addClass("gridsense-num");
+  }
+
+  // ------------------------------------------------------------ column sizing
+
+  private startColResize(e: MouseEvent, c: ColumnSpec, ci: number) {
+    e.preventDefault();
+    e.stopPropagation();
+    const colEl = this.tableEl?.querySelectorAll("col")[ci + 1] as HTMLElement | undefined;
+    if (!colEl) return;
+    const startX = e.clientX;
+    const startW = parseInt(colEl.style.width) || this.colWidth(c);
+    const move = (ev: MouseEvent) => {
+      const w = Math.max(MIN_COL_PX, startW + (ev.clientX - startX));
+      colEl.style.width = `${w}px`;
+    };
+    const up = (ev: MouseEvent) => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      const w = Math.max(MIN_COL_PX, startW + (ev.clientX - startX));
+      const cfg = this.cfg();
+      cfg.widths = cfg.widths ?? {};
+      cfg.widths[colId(c)] = w;
+      this.saveDebounced();
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  }
+
+  // ------------------------------------------------------------------- sort
+
+  private onHeaderContextMenu(e: MouseEvent, c: ColumnSpec) {
+    e.preventDefault();
+    const menu = new Menu();
+    const setSort = (dir: "asc" | "desc" | null) => {
+      this.cfg().sort = dir ? { key: c.key, dir } : null;
+      this.saveDebounced();
+      void this.render();
+    };
+    menu.addItem((i) => i.setTitle("Sort A → Z").setIcon("arrow-down-a-z").onClick(() => setSort("asc")));
+    menu.addItem((i) => i.setTitle("Sort Z → A").setIcon("arrow-up-a-z").onClick(() => setSort("desc")));
+    if (this.cfg().sort)
+      menu.addItem((i) => i.setTitle("Clear sort").setIcon("x").onClick(() => setSort(null)));
+    if (c.kind === "prop") {
+      menu.addSeparator();
+      menu.addItem((i) =>
+        i.setTitle(`Hide column "${c.key}"`).setIcon("eye-off").onClick(() => void this.hideColumn(c.key))
+      );
+    }
+    menu.addSeparator();
+    menu.addItem((i) =>
+      i.setTitle("Manage columns…").setIcon("settings-2").onClick(() => this.openColumnsModal())
+    );
+    menu.showAtMouseEvent(e);
   }
 
   // --------------------------------------------------------------- selection
@@ -281,7 +547,7 @@ export class GridView extends ItemView {
     });
     const r = this.selRange();
     if (!r) return;
-    for (let ri = r.r1; ri <= r.r2; ri++)
+    for (let ri = Math.max(r.r1, this.winStart); ri <= Math.min(r.r2, this.winEnd); ri++)
       for (let ci = r.c1; ci <= r.c2; ci++) this.cellEl(ri, ci)?.addClass("gridsense-selected");
     if (this.head) this.cellEl(this.head.row, this.head.col)?.addClass("gridsense-active");
     const n = (r.r2 - r.r1 + 1) * (r.c2 - r.c1 + 1);
@@ -297,6 +563,13 @@ export class GridView extends ItemView {
   private setSel(anchor: CellRef, head?: CellRef) {
     this.anchor = anchor;
     this.head = head ?? { ...anchor };
+    // Scroll the head cell into the virtual window before painting.
+    const hr = this.head.row;
+    if (this.scrollerEl && (hr < this.winStart + 2 || hr > this.winEnd - 3)) {
+      const target = Math.max(0, hr * this.rowH - this.scrollerEl.clientHeight / 2);
+      this.scrollerEl.scrollTop = target;
+      this.renderWindow(true);
+    }
     this.paintSelection();
     this.cellEl(this.head.row, this.head.col)?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }
@@ -323,7 +596,7 @@ export class GridView extends ItemView {
   }
 
   private selectColumn(ci: number) {
-    const last = this.store!.rows.length - 1;
+    const last = this.rows.length - 1;
     if (last < 0) return;
     this.setSel({ row: 0, col: ci }, { row: last, col: ci });
   }
@@ -331,21 +604,23 @@ export class GridView extends ItemView {
   // ---------------------------------------------------------------- keyboard
 
   private onKeyDown(e: KeyboardEvent) {
-    if (this.editing) return; // input handles its own keys
+    if (this.editing) return; // cell editor handles its own keys
+    const target = e.target as HTMLElement;
+    if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return; // toolbar filter
     const mod = e.metaKey || e.ctrlKey;
     const move = (dr: number, dc: number, extend: boolean) => {
       e.preventDefault();
       const base = extend && this.head ? this.head : this.head ?? { row: 0, col: 1 };
-      const row = Math.max(0, Math.min(this.store!.rows.length - 1, base.row + dr));
+      const row = Math.max(0, Math.min(this.rows.length - 1, base.row + dr));
       const col = Math.max(1, Math.min(this.cols.length - 1, base.col + dc));
       if (extend && this.anchor) this.setSel(this.anchor, { row, col });
       else this.setSel({ row, col });
     };
     switch (e.key) {
       case "ArrowDown":
-        return move(mod ? this.store!.rows.length : 1, 0, e.shiftKey);
+        return move(mod ? this.rows.length : 1, 0, e.shiftKey);
       case "ArrowUp":
-        return move(mod ? -this.store!.rows.length : -1, 0, e.shiftKey);
+        return move(mod ? -this.rows.length : -1, 0, e.shiftKey);
       case "ArrowRight":
         return move(0, mod ? this.cols.length : 1, e.shiftKey);
       case "ArrowLeft":
@@ -391,7 +666,6 @@ export class GridView extends ItemView {
       void this.undo();
       return;
     }
-    // Type-to-edit: printable character replaces the active cell.
     if (!mod && e.key.length === 1 && this.head) {
       this.beginEdit(this.head.row, this.head.col, e.key);
       e.preventDefault();
@@ -403,8 +677,12 @@ export class GridView extends ItemView {
   private beginEdit(ri: number, ci: number, seed?: string) {
     const c = this.cols[ci];
     if (!c || c.kind === "file") return;
-    if (c.kind === "heading") {
-      new Notice("Heading columns are read-only previews (edit the note body)");
+    if (c.kind === "heading" || c.kind === "formula") {
+      new Notice(
+        c.kind === "heading"
+          ? "Heading columns are read-only previews (edit the note body)"
+          : "Formula columns are computed (edit via ▦ columns)"
+      );
       return;
     }
     const td = this.cellEl(ri, ci);
@@ -424,14 +702,14 @@ export class GridView extends ItemView {
       this.paintCell(td, ri, ci);
       this.contentEl.focus();
       if (commit && text !== current) {
-        const row = this.store!.rows[ri];
+        const row = this.rows[ri];
         const value = parseInput(text, row.fm[c.key]);
         row.fm[c.key] = value === null ? undefined : value; // optimistic
         this.paintCell(td, ri, ci);
         void this.engine.apply(`edit ${c.key}`, [{ file: row.file, key: c.key, value }]);
       }
       if (thenMove) {
-        const row = Math.max(0, Math.min(this.store!.rows.length - 1, ri + thenMove.dr));
+        const row = Math.max(0, Math.min(this.rows.length - 1, ri + thenMove.dr));
         const col = Math.max(1, Math.min(this.cols.length - 1, ci + thenMove.dc));
         this.setSel({ row, col });
       } else {
@@ -460,9 +738,6 @@ export class GridView extends ItemView {
 
   // -------------------------------------------------------------- operations
 
-  /** Mirror pending writes into the in-memory rows so back-to-back grid ops
-   * (fill → replace, etc.) never read stale values while processFrontMatter
-   * and the metadata-cache refresh are still in flight. */
   private applyLocal(writes: { file: TFile; key: string; value: unknown }[]) {
     const byPath = new Map(this.store!.rows.map((r) => [r.file.path, r]));
     for (const w of writes) {
@@ -489,7 +764,7 @@ export class GridView extends ItemView {
     const cells = this.writableCells();
     if (!cells.length) return;
     const writes = cells.map(({ ri, ci }) => ({
-      file: this.store!.rows[ri].file,
+      file: this.rows[ri].file,
       key: this.cols[ci].key,
       value: null as unknown,
     }));
@@ -498,7 +773,6 @@ export class GridView extends ItemView {
     if (n) new Notice(`GridSense: cleared ${n} cell${n === 1 ? "" : "s"}`);
   }
 
-  /** Fill selection from its first row (down) or first column (right). */
   private async fill(dir: "down" | "right") {
     const r = this.selRange();
     if (!r) return;
@@ -508,14 +782,14 @@ export class GridView extends ItemView {
         if (this.cols[ci]?.kind !== "prop") continue;
         const src = this.cellValue(r.r1, ci);
         for (let ri = r.r1 + 1; ri <= r.r2; ri++)
-          writes.push({ file: this.store!.rows[ri].file, key: this.cols[ci].key, value: src ?? null });
+          writes.push({ file: this.rows[ri].file, key: this.cols[ci].key, value: src ?? null });
       }
     } else {
       for (let ri = r.r1; ri <= r.r2; ri++) {
         const src = this.cellValue(ri, r.c1);
         for (let ci = r.c1 + 1; ci <= r.c2; ci++) {
           if (this.cols[ci]?.kind !== "prop") continue;
-          writes.push({ file: this.store!.rows[ri].file, key: this.cols[ci].key, value: src ?? null });
+          writes.push({ file: this.rows[ri].file, key: this.cols[ci].key, value: src ?? null });
         }
       }
     }
@@ -557,6 +831,8 @@ export class GridView extends ItemView {
 
   private onPaste(e: ClipboardEvent) {
     if (this.editing || !this.head) return;
+    const target = e.target as HTMLElement;
+    if (target.tagName === "INPUT") return;
     const text = e.clipboardData?.getData("text/plain");
     if (!text) return;
     e.preventDefault();
@@ -572,10 +848,14 @@ export class GridView extends ItemView {
       line.forEach((cell, dc) => {
         const ri = start.r1 + dr;
         const ci = start.c1 + dc;
-        if (ri >= this.store!.rows.length || ci >= this.cols.length) return;
+        if (ri >= this.rows.length || ci >= this.cols.length) return;
         if (this.cols[ci].kind !== "prop") return;
-        const row = this.store!.rows[ri];
-        writes.push({ file: row.file, key: this.cols[ci].key, value: parseInput(cell, row.fm[this.cols[ci].key]) });
+        const row = this.rows[ri];
+        writes.push({
+          file: row.file,
+          key: this.cols[ci].key,
+          value: parseInput(cell, row.fm[this.cols[ci].key]),
+        });
       });
     });
     this.applyLocal(writes);
@@ -588,7 +868,6 @@ export class GridView extends ItemView {
 
   private onCellContextMenu(e: MouseEvent, ri: number, ci: number) {
     e.preventDefault();
-    // Right-click outside the current selection re-targets it.
     const r = this.selRange();
     const inside = r && ri >= r.r1 && ri <= r.r2 && ci >= r.c1 && ci <= r.c2;
     if (!inside) this.setSel({ row: ri, col: ci });
@@ -626,7 +905,6 @@ export class GridView extends ItemView {
     new FindReplaceModal(this).open();
   }
 
-  /** Visible property columns first, then hidden ones (labelled by caller). */
   propColumnKeys(): string[] {
     return this.cols.filter((c) => c.kind === "prop").map((c) => c.key);
   }
@@ -640,22 +918,19 @@ export class GridView extends ItemView {
     return this.writableCells().map(({ ri, ci }) => ({ ri, key: this.cols[ci].key }));
   }
 
-  /** Works for hidden columns too — any property key present in the scope. */
   cellsForColumn(key: string): { ri: number; key: string }[] {
     const out: { ri: number; key: string }[] = [];
-    for (let ri = 0; ri < this.store!.rows.length; ri++) out.push({ ri, key });
+    for (let ri = 0; ri < this.rows.length; ri++) out.push({ ri, key });
     return out;
   }
 
   allPropCells(): { ri: number; key: string }[] {
     const out: { ri: number; key: string }[] = [];
     const keys = this.store?.propColumns ?? [];
-    for (let ri = 0; ri < this.store!.rows.length; ri++)
-      for (const key of keys) out.push({ ri, key });
+    for (let ri = 0; ri < this.rows.length; ri++) for (const key of keys) out.push({ ri, key });
     return out;
   }
 
-  /** Used by FindReplaceModal. */
   async runReplace(
     cells: { ri: number; key: string }[],
     find: string,
@@ -667,7 +942,7 @@ export class GridView extends ItemView {
     const rx = new RegExp(find.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), flags);
     const writes: { file: TFile; key: string; value: unknown }[] = [];
     for (const { ri, key } of cells) {
-      const row = this.store!.rows[ri];
+      const row = this.rows[ri];
       if (!row) continue;
       const cur = valueToDisplay(row.fm[key]);
       if (!rx.test(cur)) continue;
@@ -683,7 +958,7 @@ export class GridView extends ItemView {
   // ---------------------------------------------------------------- columns
 
   async hideColumn(key: string) {
-    const cfg = this.plugin.folderConfig(this.folder);
+    const cfg = this.cfg();
     if (!cfg.hidden.includes(key)) cfg.hidden.push(key);
     await this.plugin.saveSettings();
     await this.render();
@@ -691,7 +966,7 @@ export class GridView extends ItemView {
   }
 
   async setColumnHidden(key: string, hidden: boolean) {
-    const cfg = this.plugin.folderConfig(this.folder);
+    const cfg = this.cfg();
     cfg.hidden = cfg.hidden.filter((k) => k !== key);
     if (hidden) cfg.hidden.push(key);
     await this.plugin.saveSettings();
@@ -702,18 +977,23 @@ export class GridView extends ItemView {
     new ColumnsModal(this).open();
   }
 
-  /** All property keys in scope, including currently hidden ones. */
   allPropertyKeys(): string[] {
     return this.store?.propColumns ?? [];
   }
 
-  // ----------------------------------------------------------- heading cols
+  scopeFolder(): string {
+    return this.folder;
+  }
+
+  refresh(): Promise<void> {
+    return this.render();
+  }
 
   addHeadingColumn() {
     const files = this.store!.files();
     const options = allHeadings(this.app, files);
     new HeadingPickModal(this.app as never, options, async (heading) => {
-      const cfg = this.plugin.folderConfig(this.folder);
+      const cfg = this.cfg();
       if (!cfg.headingColumns.includes(heading)) {
         cfg.headingColumns.push(heading);
         await this.plugin.saveSettings();
@@ -724,16 +1004,127 @@ export class GridView extends ItemView {
   }
 
   async removeHeadingColumn(heading: string) {
-    const cfg = this.plugin.folderConfig(this.folder);
+    const cfg = this.cfg();
     cfg.headingColumns = cfg.headingColumns.filter((h) => h !== heading);
     await this.plugin.saveSettings();
     this.attachStore();
     await this.render();
   }
 
+  async removeFormulaColumn(name: string) {
+    const cfg = this.cfg();
+    cfg.formulas = (cfg.formulas ?? []).filter((f) => f.name !== name);
+    await this.plugin.saveSettings();
+    await this.render();
+  }
+
   private updateStatus(text: string) {
     this.statusEl?.setText(text);
   }
+}
+
+// ------------------------------------------------------------------ suggests
+
+interface ScopeOption {
+  id: string;
+  label: string;
+}
+
+class ScopeSuggest extends AbstractInputSuggest<ScopeOption> {
+  constructor(
+    app: App,
+    private inputEl: HTMLInputElement,
+    private options: ScopeOption[],
+    private onPick: (o: ScopeOption) => void
+  ) {
+    super(app, inputEl);
+    this.limit = 0;
+  }
+
+  getSuggestions(query: string): ScopeOption[] {
+    const q = query.trim().toLowerCase();
+    if (!q) return this.options;
+    if (this.options.some((o) => o.label.toLowerCase() === q)) return this.options;
+    return this.options.filter((o) => o.label.toLowerCase().includes(q));
+  }
+
+  renderSuggestion(o: ScopeOption, el: HTMLElement): void {
+    el.setText(o.label);
+  }
+
+  selectSuggestion(o: ScopeOption): void {
+    this.onPick(o);
+    this.inputEl.value = o.label;
+    this.close();
+  }
+}
+
+/** Generic type-to-filter suggest over a dynamic string list. */
+class ListSuggest extends AbstractInputSuggest<string> {
+  constructor(
+    app: App,
+    private inputEl: HTMLInputElement,
+    private itemsFn: () => string[]
+  ) {
+    super(app, inputEl);
+    this.limit = 0;
+  }
+
+  getSuggestions(query: string): string[] {
+    const q = query.trim().toLowerCase();
+    const items = this.itemsFn();
+    if (!q || items.some((i) => i.toLowerCase() === q)) return items;
+    return items.filter((i) => i.toLowerCase().includes(q));
+  }
+
+  renderSuggestion(item: string, el: HTMLElement): void {
+    el.setText(item);
+  }
+
+  selectSuggestion(item: string): void {
+    this.inputEl.value = item;
+    this.inputEl.dispatchEvent(new Event("input"));
+    this.close();
+  }
+}
+
+function allFolderPaths(app: App): string[] {
+  const out: string[] = [];
+  const walk = (f: TFolder) => {
+    out.push(f.path === "/" ? "" : f.path);
+    for (const c of f.children) if (c instanceof TFolder) walk(c);
+  };
+  walk(app.vault.getRoot());
+  return out.sort();
+}
+
+function propsInDir(app: App, dirPath: string): string[] {
+  const root = app.vault.getAbstractFileByPath(dirPath === "" ? "/" : dirPath);
+  const keys = new Set<string>();
+  const visit = (f: TFolder) => {
+    for (const c of f.children) {
+      if (c instanceof TFolder) visit(c);
+      else if (c instanceof TFile && c.extension === "md") {
+        const fm = app.metadataCache.getFileCache(c)?.frontmatter ?? {};
+        for (const k of Object.keys(fm)) if (k !== "position") keys.add(k);
+      }
+    }
+  };
+  if (root instanceof TFolder) visit(root);
+  return [...keys].sort();
+}
+
+function headingsInDir(app: App, dirPath: string): string[] {
+  const root = app.vault.getAbstractFileByPath(dirPath === "" ? "/" : dirPath);
+  const files: TFile[] = [];
+  const visit = (f: TFolder) => {
+    for (const c of f.children) {
+      if (c instanceof TFolder) visit(c);
+      else if (c instanceof TFile && c.extension === "md") files.push(c);
+    }
+  };
+  if (root instanceof TFolder) visit(root);
+  return allHeadings(app, files);
 }
 
 // -------------------------------------------------------------------- modals
@@ -770,7 +1161,6 @@ class FindReplaceModal extends Modal {
           this.searchScope = o.id;
           t.setValue(o.label);
         });
-        // Free typing: an exact column-name match (case-insensitive) counts too.
         t.onChange((v) => {
           const needle = v.trim().toLowerCase();
           const hit =
@@ -810,56 +1200,81 @@ class FindReplaceModal extends Modal {
   }
 }
 
-interface ScopeOption {
-  id: string;
-  label: string;
-}
-
-class ScopeSuggest extends AbstractInputSuggest<ScopeOption> {
-  constructor(
-    app: App,
-    private inputEl: HTMLInputElement,
-    private options: ScopeOption[],
-    private onPick: (o: ScopeOption) => void
-  ) {
-    super(app, inputEl);
-    this.limit = 0; // uncapped — show every matching column
-  }
-
-  getSuggestions(query: string): ScopeOption[] {
-    const q = query.trim().toLowerCase();
-    if (!q) return this.options;
-    // Selecting an option writes its full label back into the input; showing
-    // everything again on that exact text keeps the picker reopenable.
-    if (this.options.some((o) => o.label.toLowerCase() === q)) return this.options;
-    return this.options.filter((o) => o.label.toLowerCase().includes(q));
-  }
-
-  renderSuggestion(o: ScopeOption, el: HTMLElement): void {
-    el.setText(o.label);
-  }
-
-  selectSuggestion(o: ScopeOption): void {
-    this.onPick(o);
-    this.inputEl.value = o.label;
-    this.close();
-  }
-}
-
 class ColumnsModal extends Modal {
   constructor(private view: GridView) {
     super(view.app);
   }
 
   onOpen() {
-    this.titleEl.setText("Columns");
+    this.titleEl.setText("Columns & views");
     this.renderBody();
+  }
+
+  private cfg(): FolderConfig {
+    return this.view.plugin.folderConfig(this.view.scopeFolder());
   }
 
   private renderBody() {
     const c = this.contentEl;
     c.empty();
-    const cfg = this.view.plugin.folderConfig(this.view.getState().folder as string);
+    const cfg = this.cfg();
+
+    // Views: apply/save/delete named snapshots of this whole config.
+    c.createEl("div", { cls: "setting-item-heading", text: "Views" });
+    const views = cfg.views ?? {};
+    const names = Object.keys(views).sort();
+    if (names.length) {
+      new Setting(c)
+        .setName("Apply view")
+        .setDesc("Restores columns, sort, filter, widths, wrap")
+        .addDropdown((d) => {
+          d.addOption("", "— pick —");
+          for (const n of names) d.addOption(n, n);
+          d.onChange(async (n) => {
+            if (!n) return;
+            const v = views[n];
+            Object.assign(cfg, structuredClone(v), { views: cfg.views });
+            await this.view.plugin.saveSettings();
+            await this.view.refresh();
+            this.renderBody();
+            new Notice(`GridSense: applied view "${n}"`);
+          });
+        })
+        .addExtraButton((b) =>
+          b.setIcon("trash").setTooltip("Delete a view").onClick(() => {
+            const menu = new Menu();
+            for (const n of names)
+              menu.addItem((i) =>
+                i.setTitle(`Delete "${n}"`).onClick(async () => {
+                  delete cfg.views![n];
+                  await this.view.plugin.saveSettings();
+                  this.renderBody();
+                })
+              );
+            menu.showAtMouseEvent(new MouseEvent("contextmenu"));
+          })
+        );
+    }
+    let viewName = "";
+    new Setting(c)
+      .setName("Save current as view")
+      .addText((t) => {
+        t.setPlaceholder("view name");
+        t.onChange((v) => (viewName = v));
+      })
+      .addButton((b) =>
+        b.setButtonText("Save").onClick(async () => {
+          const name = viewName.trim();
+          if (!name) return;
+          cfg.views = cfg.views ?? {};
+          const { views: _omit, ...rest } = cfg;
+          cfg.views[name] = structuredClone(rest);
+          await this.view.plugin.saveSettings();
+          this.renderBody();
+          new Notice(`GridSense: saved view "${name}"`);
+        })
+      );
+
     c.createEl("div", { cls: "setting-item-heading", text: "Properties" });
     for (const key of this.view.allPropertyKeys()) {
       new Setting(c).setName(key).addToggle((t) =>
@@ -868,6 +1283,7 @@ class ColumnsModal extends Modal {
         })
       );
     }
+
     c.createEl("div", { cls: "setting-item-heading", text: "Heading columns" });
     if (!cfg.headingColumns.length)
       c.createDiv({ cls: "gridsense-props-empty", text: "None yet — add one below." });
@@ -888,6 +1304,50 @@ class ColumnsModal extends Modal {
         this.view.addHeadingColumn();
       })
     );
+
+    c.createEl("div", { cls: "setting-item-heading", text: "Formula columns" });
+    for (const f of [...(cfg.formulas ?? [])]) {
+      new Setting(c)
+        .setName(`ƒ ${f.name}`)
+        .setDesc(
+          `${f.type.toUpperCase()}: ${f.lookupProp || f.name} → ${f.searchDir || "(vault)"}.${f.matchProp}` +
+            (f.returnHeading ? ` ⇒ # ${f.returnHeading}` : f.returnProp ? ` ⇒ ${f.returnProp}` : "")
+        )
+        .addExtraButton((b) =>
+          b.setIcon("pencil").setTooltip("Edit").onClick(() => {
+            this.close();
+            new FormulaBuilderModal(this.view, f).open();
+          })
+        )
+        .addExtraButton((b) =>
+          b.setIcon("trash").setTooltip("Remove").onClick(async () => {
+            await this.view.removeFormulaColumn(f.name);
+            this.renderBody();
+          })
+        );
+    }
+    new Setting(c).addButton((b) =>
+      b.setButtonText("Add formula column…").onClick(() => {
+        this.close();
+        new FormulaBuilderModal(this.view, null).open();
+      })
+    );
+
+    c.createEl("div", { cls: "setting-item-heading", text: "Rows" });
+    new Setting(c)
+      .setName("Row limit")
+      .setDesc("0 = unlimited (virtualized rendering keeps big grids fast)")
+      .addText((t) => {
+        t.setValue(String(cfg.limit ?? DEFAULT_LIMIT));
+        t.onChange(async (v) => {
+          const n = parseInt(v);
+          if (!Number.isNaN(n) && n >= 0) {
+            cfg.limit = n;
+            await this.view.plugin.saveSettings();
+            await this.view.refresh();
+          }
+        });
+      });
   }
 }
 
@@ -929,6 +1389,147 @@ class HeadingPickModal extends Modal {
           if (!value.trim()) return;
           this.close();
           this.onPick(value.trim());
+        })
+    );
+  }
+}
+
+/**
+ * XLOOKUP / XMATCH / heading-mapping builder. Every field autocompletes:
+ * directory, properties (of the searched directory or this grid), values.
+ */
+class FormulaBuilderModal extends Modal {
+  private spec: FormulaSpec;
+
+  constructor(private view: GridView, existing: FormulaSpec | null) {
+    super(view.app);
+    this.spec = existing
+      ? { ...existing }
+      : {
+          name: "",
+          type: "xlookup",
+          lookupProp: "",
+          searchDir: "",
+          matchProp: "",
+          returnProp: "",
+          returnHeading: "",
+          notFound: "",
+        };
+  }
+
+  onOpen() {
+    this.titleEl.setText(this.spec.name ? `Edit formula — ${this.spec.name}` : "Add formula column");
+    const c = this.contentEl;
+    const app = this.app;
+
+    new Setting(c)
+      .setName("Column name")
+      .setDesc("Also the default lookup property")
+      .addText((t) => {
+        t.setValue(this.spec.name);
+        t.onChange((v) => (this.spec.name = v.trim()));
+        window.setTimeout(() => t.inputEl.focus(), 0);
+      });
+
+    new Setting(c).setName("Formula").addDropdown((d) => {
+      d.addOption("xlookup", "XLOOKUP — return a value from the matched note");
+      d.addOption("xmatch", "XMATCH — return the match's position in the folder");
+      d.setValue(this.spec.type).onChange((v) => (this.spec.type = v as "xlookup" | "xmatch"));
+    });
+
+    new Setting(c)
+      .setName("Lookup property (this grid)")
+      .setDesc("Row value to look up — leave empty to use the column name")
+      .addText((t) => {
+        t.setValue(this.spec.lookupProp);
+        t.setPlaceholder("defaults to column name");
+        new ListSuggest(app, t.inputEl, () => this.view.allPropertyKeys());
+        t.onChange((v) => (this.spec.lookupProp = v.trim()));
+      });
+
+    new Setting(c)
+      .setName("Search directory")
+      .setDesc("Folder whose notes are searched")
+      .addText((t) => {
+        t.setValue(this.spec.searchDir);
+        t.setPlaceholder("(vault root)");
+        new ListSuggest(app, t.inputEl, () => allFolderPaths(app));
+        t.onChange((v) => (this.spec.searchDir = v.trim()));
+      });
+
+    new Setting(c)
+      .setName("Match property (searched notes)")
+      .addText((t) => {
+        t.setValue(this.spec.matchProp);
+        new ListSuggest(app, t.inputEl, () => propsInDir(app, this.spec.searchDir));
+        t.onChange((v) => (this.spec.matchProp = v.trim()));
+      });
+
+    new Setting(c)
+      .setName("Return property")
+      .setDesc("XLOOKUP only — leave empty to return the note name")
+      .addText((t) => {
+        t.setValue(this.spec.returnProp ?? "");
+        new ListSuggest(app, t.inputEl, () => propsInDir(app, this.spec.searchDir));
+        t.onChange((v) => (this.spec.returnProp = v.trim()));
+      });
+
+    new Setting(c)
+      .setName("…or return heading section")
+      .setDesc("Heading-mapping: return the matched note's content under this heading")
+      .addText((t) => {
+        t.setValue(this.spec.returnHeading ?? "");
+        new ListSuggest(app, t.inputEl, () => headingsInDir(app, this.spec.searchDir));
+        t.onChange((v) => (this.spec.returnHeading = v.trim()));
+      });
+
+    new Setting(c)
+      .setName("If not found")
+      .addText((t) => {
+        t.setValue(this.spec.notFound);
+        t.setPlaceholder("(empty)");
+        new ListSuggest(app, t.inputEl, () => {
+          const prop = this.spec.returnProp;
+          if (!prop) return [];
+          const vals = new Set<string>();
+          for (const key of propsInDir(app, this.spec.searchDir)) void key;
+          const root = app.vault.getAbstractFileByPath(
+            this.spec.searchDir === "" ? "/" : this.spec.searchDir
+          );
+          const visit = (f: TFolder) => {
+            for (const ch of f.children) {
+              if (ch instanceof TFolder) visit(ch);
+              else if (ch instanceof TFile && ch.extension === "md") {
+                const v = app.metadataCache.getFileCache(ch)?.frontmatter?.[prop];
+                if (v !== undefined && v !== null) vals.add(valueToDisplay(v));
+              }
+            }
+          };
+          if (root instanceof TFolder) visit(root);
+          return [...vals].sort().slice(0, 200);
+        });
+        t.onChange((v) => (this.spec.notFound = v));
+      });
+
+    new Setting(c).addButton((b) =>
+      b
+        .setButtonText(this.spec.name ? "Save" : "Add")
+        .setCta()
+        .onClick(async () => {
+          if (!this.spec.name) {
+            new Notice("GridSense: the formula column needs a name");
+            return;
+          }
+          if (!this.spec.matchProp) {
+            new Notice("GridSense: pick a match property");
+            return;
+          }
+          const cfg = this.view.plugin.folderConfig(this.view.scopeFolder());
+          cfg.formulas = (cfg.formulas ?? []).filter((f) => f.name !== this.spec.name);
+          cfg.formulas.push(this.spec);
+          await this.view.plugin.saveSettings();
+          this.close();
+          await this.view.refresh();
         })
     );
   }

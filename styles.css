@@ -244,3 +244,55 @@ td.gridsense-active {
   color: var(--color-green);
   font-size: var(--font-ui-smaller);
 }
+
+/* -------------------------- v0.2 grid enhancements ----------------------- */
+
+.gridsense-filter {
+  width: 160px;
+  font-size: var(--font-ui-small);
+}
+
+.gridsense-table th {
+  position: relative;
+}
+
+.gridsense-col-grip {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 3;
+}
+
+.gridsense-sort-ind {
+  color: var(--text-accent);
+  font-size: var(--font-ui-smaller);
+}
+
+.gridsense-table {
+  table-layout: fixed;
+}
+
+.gridsense-table td {
+  max-width: none;
+}
+
+.gridsense-table.gridsense-wrap td {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.gridsense-table.gridsense-wrap .gridsense-heading-preview {
+  max-height: none;
+}
+
+.gridsense-spacer td {
+  border: none;
+  padding: 0;
+}
+
+.gridsense-col-formula {
+  background: color-mix(in srgb, var(--interactive-accent) 6%, transparent);
+}

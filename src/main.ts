@@ -1,4 +1,4 @@
-import { FuzzySuggestModal, Plugin, TFolder } from "obsidian";
+import { FuzzySuggestModal, Plugin, PluginSettingTab, Setting, TFolder } from "obsidian";
 import { GRID_VIEW_TYPE, GridView } from "./grid-view";
 import { NotePropsModal } from "./note-props";
 import { DEFAULT_SETTINGS, FolderConfig, GridSenseSettings } from "./types";
@@ -9,6 +9,7 @@ export default class GridSensePlugin extends Plugin {
   async onload() {
     await this.loadSettings();
 
+    this.addSettingTab(new GridSenseSettingTab(this));
     this.registerView(GRID_VIEW_TYPE, (leaf) => new GridView(leaf, this));
 
     this.addCommand({
@@ -66,6 +67,27 @@ export default class GridSensePlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+}
+
+class GridSenseSettingTab extends PluginSettingTab {
+  constructor(private plugin: GridSensePlugin) {
+    super(plugin.app, plugin);
+  }
+
+  display(): void {
+    this.containerEl.empty();
+    new Setting(this.containerEl)
+      .setName("Show heading names in heading columns")
+      .setDesc(
+        "Heading-embed cells start with the heading itself (as a link into the note). Turn off to show just the section content with a small ↳ link."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.showHeadingNames).onChange(async (v) => {
+          this.plugin.settings.showHeadingNames = v;
+          await this.plugin.saveSettings();
+        })
+      );
   }
 }
 
