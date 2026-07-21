@@ -88,9 +88,9 @@ class GridSenseSettingTab extends PluginSettingTab {
   display(): void {
     this.containerEl.empty();
     new Setting(this.containerEl)
-      .setName("Replace Obsidian's properties panel")
+      .setName("Replace Obsidian's properties panel (beta)")
       .setDesc(
-        "Hide the native frontmatter render in notes and show GridSense's keyboard-friendly property editor in its place (Live Preview and Reading mode)."
+        "Hide the native frontmatter render in notes and show GridSense's keyboard-friendly property editor in its place (Live Preview and Reading mode). Off by default while in beta."
       )
       .addToggle((t) =>
         t.setValue(this.plugin.settings.inlineProps).onChange(async (v) => {

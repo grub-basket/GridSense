@@ -93,5 +93,5 @@ export interface GridSenseSettings {
 export const DEFAULT_SETTINGS: GridSenseSettings = {
   folders: {},
   showHeadingNames: true,
-  inlineProps: true,
+  inlineProps: false,
 };

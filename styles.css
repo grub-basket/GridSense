@@ -378,3 +378,97 @@ body.gridsense-inline-props .metadata-container .metadata-add-button {
 .gridsense-props-add:hover {
   color: var(--text-accent);
 }
+
+/* ------------------- props editor v2: types, chips, zoom ----------------- */
+
+.gridsense-props-row {
+  display: grid;
+  grid-template-columns: 24px minmax(120px, 1fr) 2fr 18px;
+  gap: 2px;
+  align-items: start;
+}
+
+.gridsense-props-type {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 1.6em;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 4px;
+}
+.gridsense-props-type:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+.gridsense-props-type svg {
+  width: 14px;
+  height: 14px;
+}
+
+.gridsense-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.gridsense-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--tag-background, var(--background-secondary));
+  color: var(--tag-color, var(--text-normal));
+  border-radius: var(--tag-radius, 12px);
+  padding: 0 8px;
+  font-size: var(--font-ui-smaller);
+  line-height: 1.6;
+}
+
+.gridsense-chip-x {
+  color: var(--text-faint);
+  cursor: pointer;
+}
+.gridsense-chip-x:hover {
+  color: var(--text-error);
+}
+
+.gridsense-chips-empty {
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+}
+
+.gridsense-props-add {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: inherit;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px 8px;
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: 4px;
+  margin-top: 2px;
+}
+.gridsense-props-add:hover {
+  color: var(--text-accent);
+  border-color: var(--text-accent);
+}
+.gridsense-props-add svg {
+  width: 14px;
+  height: 14px;
+}
+
+.gridsense-props-del {
+  position: static;
+  align-self: center;
+  margin-left: 4px;
+}
+
+.gridsense-zoom-text {
+  width: 100%;
+  min-height: 40vh;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-small);
+  resize: vertical;
+}

@@ -19,6 +19,7 @@ import { allHeadings } from "./headings";
 import { HistoryLogModal, appendHistory, readHistory } from "./history-log";
 import { CellRef, ColumnSpec, FolderConfig, FormulaSpec, Row, colId } from "./types";
 import { evaluateFormulas } from "./formulas";
+import { ZoomValueModal } from "./zoom";
 
 export const GRID_VIEW_TYPE = "gridsense-grid";
 
@@ -1035,10 +1036,29 @@ export class GridView extends ItemView {
     menu.addSeparator();
     menu.addItem((i) => i.setTitle("Find & replace… (⌘F)").setIcon("replace").onClick(() => this.openFindReplace()));
     const col = this.cols[ci];
-    if (col?.kind === "prop")
+    if (col?.kind === "prop") {
+      menu.addItem((i) =>
+        i.setTitle("Zoom cell…").setIcon("maximize-2").onClick(() => {
+          const row = this.rows[ri];
+          if (!row) return;
+          new ZoomValueModal(
+            this.app,
+            `${col.key} — ${row.file.basename}`,
+            valueToDisplay(row.fm[col.key]),
+            async (text) => {
+              const value = parseInput(text, row.fm[col.key]);
+              this.applyLocal([{ file: row.file, key: col.key, value }]);
+              await this.engine.apply(`zoom edit ${col.key}`, [
+                { file: row.file, key: col.key, value },
+              ]);
+            }
+          ).open();
+        })
+      );
       menu.addItem((i) =>
         i.setTitle(`Hide column "${col.key}"`).setIcon("eye-off").onClick(() => void this.hideColumn(col.key))
       );
+    }
     menu.showAtMouseEvent(e);
   }
 
