@@ -161,7 +161,10 @@ export class GridView extends ItemView {
     mkBtn("⇅ find & replace", "Find & replace in selection (or whole grid)", () =>
       this.openFindReplace()
     );
-    mkBtn("⎌ undo", "Undo last grid edit (Cmd/Ctrl+Z)", () => void this.undo());
+    mkBtn("⎌ undo", "Undo last grid action (⌘Z) — edits and column hides alike", () =>
+      void this.undo()
+    );
+    mkBtn("↻ redo", "Redo (⇧⌘Z or ⌘Y)", () => void this.engine.redo());
     mkBtn("🕘 history", "Permanent edit log for this grid (survives restarts)", async () => {
       const entries = await readHistory(this.app, this.folder);
       new HistoryLogModal(this.app, this.folder, entries).open();
@@ -704,13 +707,23 @@ export class GridView extends ItemView {
     window.addEventListener("mouseup", up);
   }
 
-  private onCellMouseEnter(_e: MouseEvent, ri: number, ci: number) {
-    if (this.dragging && this.anchor) this.setSel(this.anchor, { row: ri, col: ci });
+  private onCellMouseEnter(e: MouseEvent, ri: number, ci: number) {
+    if (!this.dragging) return;
+    // The primary button must still be held — a mouseup that landed outside
+    // the window (or over a menu) otherwise leaves a phantom drag that keeps
+    // highlighting cells as the cursor moves.
+    if (!(e.buttons & 1)) {
+      this.dragging = false;
+      return;
+    }
+    if (this.anchor) this.setSel(this.anchor, { row: ri, col: ci });
   }
 
   private selectColumn(ci: number) {
     const last = this.rows.length - 1;
     if (last < 0) return;
+    // Focus the grid so ⌘D/⌘R etc. work immediately after a header click.
+    this.contentEl.focus();
     this.setSel({ row: 0, col: ci }, { row: last, col: ci });
   }
 
@@ -777,6 +790,16 @@ export class GridView extends ItemView {
     if (mod && (e.key === "z" || e.key === "Z") && !e.shiftKey) {
       e.preventDefault();
       void this.undo();
+      return;
+    }
+    if (mod && ((e.key === "z" || e.key === "Z") && e.shiftKey)) {
+      e.preventDefault();
+      void this.engine.redo();
+      return;
+    }
+    if (mod && (e.key === "y" || e.key === "Y")) {
+      e.preventDefault();
+      void this.engine.redo();
       return;
     }
     if (!mod && e.key.length === 1 && this.head) {
@@ -888,7 +911,22 @@ export class GridView extends ItemView {
 
   private async fill(dir: "down" | "right") {
     const r = this.selRange();
-    if (!r) return;
+    if (!r) {
+      new Notice("GridSense: nothing selected — click a cell first");
+      return;
+    }
+    if (dir === "down" && r.r1 === r.r2) {
+      new Notice(
+        "GridSense: ⌘D needs a vertical range — the top row's values fill downward (any rectangle works, not just whole columns)"
+      );
+      return;
+    }
+    if (dir === "right" && r.c1 === r.c2) {
+      new Notice(
+        "GridSense: ⌘R needs a horizontal range — the left column's values fill rightward"
+      );
+      return;
+    }
     const writes: { file: TFile; key: string; value: unknown }[] = [];
     if (dir === "down") {
       for (let ci = r.c1; ci <= r.c2; ci++) {
@@ -1097,20 +1135,31 @@ export class GridView extends ItemView {
     await this.render();
   }
 
-  async hideColumn(key: string) {
-    const cfg = this.cfg();
-    if (!cfg.hidden.includes(key)) cfg.hidden.push(key);
-    await this.plugin.saveSettings();
-    await this.render();
-    new Notice(`GridSense: hid "${key}" (▦ columns to restore)`);
-  }
-
-  async setColumnHidden(key: string, hidden: boolean) {
+  private async setHiddenInternal(key: string, hidden: boolean) {
     const cfg = this.cfg();
     cfg.hidden = cfg.hidden.filter((k) => k !== key);
     if (hidden) cfg.hidden.push(key);
     await this.plugin.saveSettings();
     await this.render();
+  }
+
+  async hideColumn(key: string) {
+    await this.setHiddenInternal(key, true);
+    this.engine.pushUi(
+      `hide column "${key}"`,
+      () => this.setHiddenInternal(key, false),
+      () => this.setHiddenInternal(key, true)
+    );
+    new Notice(`GridSense: hid "${key}" — ⌘Z to undo`);
+  }
+
+  async setColumnHidden(key: string, hidden: boolean) {
+    await this.setHiddenInternal(key, hidden);
+    this.engine.pushUi(
+      `${hidden ? "hide" : "show"} column "${key}"`,
+      () => this.setHiddenInternal(key, !hidden),
+      () => this.setHiddenInternal(key, hidden)
+    );
   }
 
   private openColumnsModal() {
@@ -1149,13 +1198,47 @@ export class GridView extends ItemView {
     await this.plugin.saveSettings();
     this.attachStore();
     await this.render();
+    this.engine.pushUi(
+      `remove heading column "${heading}"`,
+      async () => {
+        const c = this.cfg();
+        if (!c.headingColumns.includes(heading)) c.headingColumns.push(heading);
+        await this.plugin.saveSettings();
+        this.attachStore();
+        await this.render();
+      },
+      async () => {
+        const c = this.cfg();
+        c.headingColumns = c.headingColumns.filter((h) => h !== heading);
+        await this.plugin.saveSettings();
+        this.attachStore();
+        await this.render();
+      }
+    );
   }
 
   async removeFormulaColumn(name: string) {
     const cfg = this.cfg();
+    const saved = (cfg.formulas ?? []).find((f) => f.name === name);
     cfg.formulas = (cfg.formulas ?? []).filter((f) => f.name !== name);
     await this.plugin.saveSettings();
     await this.render();
+    if (!saved) return;
+    this.engine.pushUi(
+      `remove formula column "${name}"`,
+      async () => {
+        const c = this.cfg();
+        c.formulas = [...(c.formulas ?? []).filter((f) => f.name !== name), saved];
+        await this.plugin.saveSettings();
+        await this.render();
+      },
+      async () => {
+        const c = this.cfg();
+        c.formulas = (c.formulas ?? []).filter((f) => f.name !== name);
+        await this.plugin.saveSettings();
+        await this.render();
+      }
+    );
   }
 
   private updateStatus(text: string) {

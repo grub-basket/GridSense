@@ -42,13 +42,30 @@ function coerceScalar(t: string): unknown {
   return t;
 }
 
-/** In-memory undo stack of grid write operations. */
-export class EditEngine {
-  history: HistoryEntry[] = [];
+interface UiAction {
+  kind: "ui";
+  label: string;
+  undoFn: () => Promise<void>;
+  redoFn: () => Promise<void>;
+}
 
-  /** onEntry receives every committed entry (including undos) for the
-   * immortal on-disk log; the in-memory stack alone drives undo. */
+type StackEntry = { kind: "fm"; entry: HistoryEntry } | UiAction;
+
+/** In-memory undo/redo stack: frontmatter writes AND UI actions (column
+ * hide/remove) share one stack, so ⌘Z walks back whatever you did last. */
+export class EditEngine {
+  private undoStack: StackEntry[] = [];
+  private redoStack: StackEntry[] = [];
+
+  /** onEntry receives every committed frontmatter entry (including undos and
+   * redos) for the immortal on-disk log; UI actions are not logged there. */
   constructor(private app: App, private onEntry?: (entry: HistoryEntry) => void) {}
+
+  /** Record an undoable UI action (e.g. hiding a column). */
+  pushUi(label: string, undoFn: () => Promise<void>, redoFn: () => Promise<void>) {
+    this.undoStack.push({ kind: "ui", label, undoFn, redoFn });
+    this.redoStack = [];
+  }
 
   /** Apply one batch of cell writes as a single undoable entry. */
   async apply(
@@ -71,18 +88,26 @@ export class EditEngine {
     }
     if (changes.length) {
       const entry: HistoryEntry = { label, when: Date.now(), changes };
-      this.history.push(entry);
+      this.undoStack.push({ kind: "fm", entry });
+      this.redoStack = [];
       this.onEntry?.(entry);
     }
     return changes.length;
   }
 
   async undo(): Promise<void> {
-    const entry = this.history.pop();
-    if (!entry) {
+    const top = this.undoStack.pop();
+    if (!top) {
       new Notice("GridSense: nothing to undo");
       return;
     }
+    if (top.kind === "ui") {
+      await top.undoFn();
+      this.redoStack.push(top);
+      new Notice(`GridSense: undid "${top.label}"`);
+      return;
+    }
+    const entry = top.entry;
     let reverted = 0;
     const undone: ChangeRecord[] = [];
     for (const c of entry.changes) {
@@ -95,8 +120,40 @@ export class EditEngine {
         undone.push({ path: c.path, key: c.key, before: c.after, after: c.before });
       });
     }
+    this.redoStack.push(top);
     if (undone.length)
       this.onEntry?.({ label: `undo: ${entry.label}`, when: Date.now(), changes: undone });
     new Notice(`GridSense: undid "${entry.label}" (${reverted} cell${reverted === 1 ? "" : "s"})`);
+  }
+
+  async redo(): Promise<void> {
+    const top = this.redoStack.pop();
+    if (!top) {
+      new Notice("GridSense: nothing to redo");
+      return;
+    }
+    if (top.kind === "ui") {
+      await top.redoFn();
+      this.undoStack.push(top);
+      new Notice(`GridSense: redid "${top.label}"`);
+      return;
+    }
+    const entry = top.entry;
+    let reapplied = 0;
+    const redone: ChangeRecord[] = [];
+    for (const c of entry.changes) {
+      const file = this.app.vault.getAbstractFileByPath(c.path);
+      if (!(file instanceof TFile)) continue;
+      await this.app.fileManager.processFrontMatter(file, (fm) => {
+        if (c.after === null || c.after === undefined) delete fm[c.key];
+        else fm[c.key] = c.after;
+        reapplied++;
+        redone.push(c);
+      });
+    }
+    this.undoStack.push(top);
+    if (redone.length)
+      this.onEntry?.({ label: `redo: ${entry.label}`, when: Date.now(), changes: redone });
+    new Notice(`GridSense: redid "${entry.label}" (${reapplied} cell${reapplied === 1 ? "" : "s"})`);
   }
 }

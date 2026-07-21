@@ -1,6 +1,6 @@
 {
   "name": "gridsense",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Excel-grade grid over notes' frontmatter for Obsidian",
   "scripts": {
