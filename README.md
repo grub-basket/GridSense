@@ -16,13 +16,12 @@ All writes go through Obsidian's `processFrontMatter` — nothing touches your n
 
 ## Installation
 
-Not yet in the community plugin store. Until then:
+**GridSense is in the [community plugin store](https://community.obsidian.md/plugins/gridsense)** — in Obsidian, go to Settings → Community plugins → Browse, search for "GridSense", install, and enable.
 
-1. Download `main.js`, `manifest.json`, and `styles.css` from the latest release.
-2. Copy them into `<your vault>/.obsidian/plugins/gridsense/`.
-3. Enable **GridSense** in Settings → Community plugins.
+Other ways to install:
 
-Or install via [BRAT](https://github.com/TfTHacker/obsidian42-brat) once the repo is public.
+- **BRAT** (for pre-release builds): add `grub-basket/GridSense` in [BRAT](https://github.com/TfTHacker/obsidian42-brat).
+- **Manual**: download `main.js`, `manifest.json`, and `styles.css` from the latest release and copy them into `<your vault>/.obsidian/plugins/gridsense/`, then enable **GridSense** in Settings → Community plugins.
 
 ## License
 

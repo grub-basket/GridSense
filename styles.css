@@ -328,3 +328,53 @@ td.gridsense-active {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* ------------------------- inline properties takeover -------------------- */
+
+body.gridsense-inline-props .metadata-container .metadata-properties,
+body.gridsense-inline-props .metadata-container .metadata-properties-heading,
+body.gridsense-inline-props .metadata-container .metadata-add-button {
+  display: none;
+}
+
+.gridsense-inline-strip {
+  padding: 4px 0 8px;
+}
+
+.gridsense-inline-strip::before {
+  content: "GridSense properties";
+  display: block;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+  margin-bottom: 4px;
+}
+
+.gridsense-props-host {
+  outline: none;
+}
+
+.gridsense-props-row {
+  position: relative;
+}
+
+.gridsense-props-del {
+  position: absolute;
+  right: -18px;
+  top: 4px;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: var(--font-ui-smaller);
+}
+.gridsense-props-del:hover {
+  color: var(--text-error);
+}
+
+.gridsense-props-add {
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.gridsense-props-add:hover {
+  color: var(--text-accent);
+}

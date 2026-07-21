@@ -1,15 +1,21 @@
 import { FuzzySuggestModal, Plugin, PluginSettingTab, Setting, TFolder } from "obsidian";
 import { GRID_VIEW_TYPE, GridView } from "./grid-view";
 import { NotePropsModal } from "./note-props";
+import { InlinePropsManager } from "./inline-props";
 import { DEFAULT_SETTINGS, FolderConfig, GridSenseSettings } from "./types";
 
 export default class GridSensePlugin extends Plugin {
   settings: GridSenseSettings = DEFAULT_SETTINGS;
+  inlineProps: InlinePropsManager | null = null;
 
   async onload() {
     await this.loadSettings();
 
     this.addSettingTab(new GridSenseSettingTab(this));
+    this.inlineProps = new InlinePropsManager(this.app, this);
+    this.app.workspace.onLayoutReady(() => {
+      if (this.settings.inlineProps) this.inlineProps?.enable();
+    });
     this.registerView(GRID_VIEW_TYPE, (leaf) => new GridView(leaf, this));
 
     this.addCommand({
@@ -68,6 +74,10 @@ export default class GridSensePlugin extends Plugin {
   async saveSettings() {
     await this.saveData(this.settings);
   }
+
+  onunload() {
+    this.inlineProps?.disable();
+  }
 }
 
 class GridSenseSettingTab extends PluginSettingTab {
@@ -77,6 +87,19 @@ class GridSenseSettingTab extends PluginSettingTab {
 
   display(): void {
     this.containerEl.empty();
+    new Setting(this.containerEl)
+      .setName("Replace Obsidian's properties panel")
+      .setDesc(
+        "Hide the native frontmatter render in notes and show GridSense's keyboard-friendly property editor in its place (Live Preview and Reading mode)."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.inlineProps).onChange(async (v) => {
+          this.plugin.settings.inlineProps = v;
+          await this.plugin.saveSettings();
+          if (v) this.plugin.inlineProps?.enable();
+          else this.plugin.inlineProps?.disable();
+        })
+      );
     new Setting(this.containerEl)
       .setName("Show heading names in heading columns")
       .setDesc(

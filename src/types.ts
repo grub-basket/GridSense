@@ -86,6 +86,12 @@ export interface GridSenseSettings {
   folders: Record<string, FolderConfig>;
   /** Show the heading name as the first line of heading-embed cells. */
   showHeadingNames: boolean;
+  /** Replace Obsidian's native properties panel with the GridSense editor. */
+  inlineProps: boolean;
 }
 
-export const DEFAULT_SETTINGS: GridSenseSettings = { folders: {}, showHeadingNames: true };
+export const DEFAULT_SETTINGS: GridSenseSettings = {
+  folders: {},
+  showHeadingNames: true,
+  inlineProps: true,
+};
