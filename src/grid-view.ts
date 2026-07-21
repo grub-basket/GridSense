@@ -5,6 +5,7 @@ import {
   Menu,
   Modal,
   Notice,
+  Scope,
   Setting,
   TFile,
   TFolder,
@@ -64,6 +65,25 @@ export class GridView extends ItemView {
     this.engine = new EditEngine(this.app, (entry) =>
       void appendHistory(this.app, this.folder, entry)
     );
+    // View-level keymap scope: active whenever this pane is focused. Without
+    // it, Obsidian's own hotkeys win — ⌘D is editor:delete-paragraph by
+    // default and swallows the event before any DOM listener runs.
+    this.scope = new Scope(this.app.scope);
+    const bind = (mods: string[], key: string, fn: () => void) =>
+      this.scope!.register(mods as never, key, (e) => {
+        if (this.editing) return true; // let the cell editor keep its keys
+        const target = e.target as HTMLElement | null;
+        if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return true;
+        e.preventDefault();
+        fn();
+        return false;
+      });
+    bind(["Mod"], "d", () => void this.fill("down"));
+    bind(["Mod"], "r", () => void this.fill("right"));
+    bind(["Mod"], "f", () => this.openFindReplace());
+    bind(["Mod"], "z", () => void this.undo());
+    bind(["Mod", "Shift"], "z", () => void this.engine.redo());
+    bind(["Mod"], "y", () => void this.engine.redo());
   }
 
   getViewType() {
@@ -772,36 +792,8 @@ export class GridView extends ItemView {
         this.paintSelection();
         return;
     }
-    if (mod && (e.key === "d" || e.key === "D")) {
-      e.preventDefault();
-      void this.fill("down");
-      return;
-    }
-    if (mod && (e.key === "r" || e.key === "R")) {
-      e.preventDefault();
-      void this.fill("right");
-      return;
-    }
-    if (mod && (e.key === "f" || e.key === "F")) {
-      e.preventDefault();
-      this.openFindReplace();
-      return;
-    }
-    if (mod && (e.key === "z" || e.key === "Z") && !e.shiftKey) {
-      e.preventDefault();
-      void this.undo();
-      return;
-    }
-    if (mod && ((e.key === "z" || e.key === "Z") && e.shiftKey)) {
-      e.preventDefault();
-      void this.engine.redo();
-      return;
-    }
-    if (mod && (e.key === "y" || e.key === "Y")) {
-      e.preventDefault();
-      void this.engine.redo();
-      return;
-    }
+    // ⌘D/⌘R/⌘F/⌘Z/⇧⌘Z/⌘Y are handled by the view's keymap Scope (see the
+    // constructor) so they beat Obsidian's own hotkeys; not duplicated here.
     if (!mod && e.key.length === 1 && this.head) {
       this.beginEdit(this.head.row, this.head.col, e.key);
       e.preventDefault();
