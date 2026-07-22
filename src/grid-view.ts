@@ -27,7 +27,11 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
-const DEFAULT_LIMIT = 2000;
+// No cap by default: a silent cap made fresh grids look complete when they
+// weren't. Virtualized rendering keeps even huge folders responsive; past
+// WARN_ROWS we surface a warning instead of truncating.
+const DEFAULT_LIMIT = 0;
+const WARN_ROWS = 10000;
 const MIN_COL_PX = 60;
 const MAX_COL_PX = 340;
 const ROW_BUFFER = 20;
@@ -54,6 +58,8 @@ export class GridView extends ItemView {
   private toolbarEl: HTMLElement | null = null;
   private statusEl: HTMLElement | null = null;
   private pendingEl: HTMLElement | null = null;
+  private rowCountEl: HTMLElement | null = null;
+  private warnEl: HTMLElement | null = null;
   private pendingWhileEditing = false;
   private rowH = 27;
   private winStart = 0;
@@ -222,6 +228,11 @@ export class GridView extends ItemView {
       text: "⟳ other files in this folder changed — grid refreshes when you finish editing",
     });
     this.pendingEl.hide();
+    this.warnEl = bar.createEl("button", { cls: "gridsense-rowwarn" });
+    this.warnEl.setAttr("title", "Open columns & views to hide columns or set a row limit");
+    this.warnEl.addEventListener("click", () => this.openColumnsModal());
+    this.warnEl.hide();
+    this.rowCountEl = bar.createSpan({ cls: "gridsense-rowcount" });
     this.statusEl = bar.createSpan({ cls: "gridsense-status" });
 
     this.scrollerEl = content.createDiv({ cls: "gridsense-scroller" });
@@ -311,8 +322,35 @@ export class GridView extends ItemView {
 
     this.buildTable();
     this.paintSelection();
-    const parts = [`${this.viewRows.length} notes`, `${this.cols.length - 1} columns`];
-    if (this.truncated) parts.push(`${this.truncated} beyond limit`);
+    // Prominent row count: total when everything shows, "x of y" otherwise.
+    const totalAll = this.store.rows.length;
+    const visible = this.viewRows.length;
+    if (this.rowCountEl) {
+      this.rowCountEl.setText(
+        visible === totalAll
+          ? `${totalAll.toLocaleString()} rows`
+          : `${visible.toLocaleString()} of ${totalAll.toLocaleString()} rows`
+      );
+      this.rowCountEl.toggleClass("gridsense-rowcount-partial", visible !== totalAll);
+      const why: string[] = [];
+      if (needle) why.push("filter");
+      if (this.truncated) why.push(`row limit (${limit})`);
+      this.rowCountEl.setAttr(
+        "title",
+        visible === totalAll ? "All rows visible" : `Reduced by: ${why.join(" + ")}`
+      );
+    }
+    if (this.warnEl) {
+      if (totalAll > WARN_ROWS && !(limit > 0)) {
+        this.warnEl.setText(
+          `⚠ ${totalAll.toLocaleString()} rows — hide columns or set a row limit`
+        );
+        this.warnEl.show();
+      } else {
+        this.warnEl.hide();
+      }
+    }
+    const parts = [`${this.cols.length - 1} columns`];
     if (needle) parts.push("filtered");
     this.updateStatus(parts.join(" · "));
     if (!this.pendingWhileEditing) this.pendingEl?.hide();
@@ -1572,7 +1610,7 @@ class ColumnsModal extends Modal {
     c.createEl("div", { cls: "setting-item-heading", text: "Rows" });
     new Setting(c)
       .setName("Row limit")
-      .setDesc("0 = unlimited (virtualized rendering keeps big grids fast)")
+      .setDesc("0 = unlimited (the default — virtualized rendering keeps big grids fast). The row counter shows when a limit is trimming the grid.")
       .addText((t) => {
         t.setValue(String(cfg.limit ?? DEFAULT_LIMIT));
         t.onChange(async (v) => {

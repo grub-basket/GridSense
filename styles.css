@@ -472,3 +472,29 @@ body.gridsense-inline-props .metadata-container .metadata-add-button {
   font-size: var(--font-ui-small);
   resize: vertical;
 }
+
+/* --------------------------- row count + warning ------------------------- */
+
+.gridsense-rowcount {
+  font-weight: 600;
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+  padding: 2px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: var(--background-secondary);
+}
+
+.gridsense-rowcount-partial {
+  color: var(--color-orange);
+  border-color: var(--color-orange);
+}
+
+.gridsense-rowwarn {
+  color: var(--color-orange);
+  border: 1px solid var(--color-orange);
+  background: transparent;
+  border-radius: 6px;
+  font-size: var(--font-ui-smaller);
+  cursor: pointer;
+}
