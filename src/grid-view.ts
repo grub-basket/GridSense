@@ -60,6 +60,17 @@ export class GridView extends ItemView {
   private pendingEl: HTMLElement | null = null;
   private rowCountEl: HTMLElement | null = null;
   private warnEl: HTMLElement | null = null;
+  /** Excel-style order stability: once displayed, row order is frozen until
+   * the user changes sort/filter/scope — edits and new rows never reshuffle. */
+  private frozenPathOrder: string[] | null = null;
+  /** Notes created from draft rows keep their draft-side position. */
+  private pinnedNew = new Map<string, "top" | "bottom">();
+  /** UI-only draft rows (no file exists until committed). */
+  private drafts: { top: Record<string, string>; bottom: Record<string, string> } = {
+    top: {},
+    bottom: {},
+  };
+  private draftFocusPending: "top" | "bottom" | null = null;
   private pendingWhileEditing = false;
   private rowH = 27;
   private winStart = 0;
@@ -178,7 +189,8 @@ export class GridView extends ItemView {
       b.addEventListener("click", fn);
       return b;
     };
-    mkBtn("↺", "Recompile from notes", () => {
+    mkBtn("↺", "Recompile from notes (also re-derives row order)", () => {
+      this.resetRowOrder();
       this.attachStore();
       void this.render();
     });
@@ -215,6 +227,7 @@ export class GridView extends ItemView {
     const applyFilter = debounce(
       () => {
         this.cfg().filter = filter.value;
+        this.resetRowOrder();
         this.saveDebounced();
         this.requestRender();
       },
@@ -243,9 +256,11 @@ export class GridView extends ItemView {
 
   async render() {
     if (!this.store || !this.scrollerEl) return;
-    if (this.store.isEmpty) await this.store.compile();
-    else if (this.store.isDirty)
-      void this.store.compile().then(() => this.requestRender());
+    // Always await the compile: the old fire-and-forget + re-render chain
+    // could drop the follow-up render, leaving the grid on stale rows. The
+    // snapshot preload already guarantees a fast first paint, and compiles
+    // are debounced + cheap (metadata-cache reads).
+    if (this.store.isEmpty || this.store.isDirty) await this.store.compile();
 
     const cfg = this.cfg();
     // Columns: file + visible props + formulas + headings.
@@ -293,7 +308,7 @@ export class GridView extends ItemView {
       });
     }
     const sort = cfg.sort;
-    if (sort) {
+    if (sort && !this.frozenPathOrder) {
       const dir = sort.dir === "desc" ? -1 : 1;
       const val = (r: Row): unknown => {
         if (sort.key === "file") return r.file.basename;
@@ -316,6 +331,24 @@ export class GridView extends ItemView {
         }) * dir;
       });
     }
+    // Freeze (or apply the frozen) display order — Excel semantics: data
+    // edits never move rows; only sort/filter/scope changes re-derive order.
+    if (!this.frozenPathOrder) {
+      this.frozenPathOrder = rows.map((r) => r.file.path);
+    } else {
+      const rank = new Map(this.frozenPathOrder.map((p, i) => [p, i]));
+      const top: Row[] = [];
+      const mid: Row[] = [];
+      const bot: Row[] = [];
+      for (const r of rows) {
+        if (rank.has(r.file.path)) mid.push(r);
+        else if (this.pinnedNew.get(r.file.path) === "top") top.push(r);
+        else bot.push(r);
+      }
+      mid.sort((a, b) => (rank.get(a.file.path) ?? 0) - (rank.get(b.file.path) ?? 0));
+      rows = [...top, ...mid, ...bot];
+    }
+
     // Per-folder limit wins; otherwise the plugin-wide default from settings.
     const limit = cfg.limit ?? this.plugin.settings.defaultRowLimit ?? DEFAULT_LIMIT;
     this.truncated = limit > 0 ? Math.max(0, rows.length - limit) : 0;
@@ -443,48 +476,107 @@ export class GridView extends ItemView {
       grip.addEventListener("mousedown", (e) => this.startColResize(e, c, ci));
     });
 
+    this.buildDraftRow("top", thead);
     this.tbodyEl = table.createEl("tbody");
     this.winStart = -1;
     this.winEnd = -1;
     this.renderWindow(true);
     this.buildFooter(table);
     scroller.scrollTop = prevScroll;
+    if (this.draftFocusPending) {
+      const which = this.draftFocusPending;
+      this.draftFocusPending = null;
+      (
+        table.querySelector(
+          `.gridsense-draft-${which} input[data-draft-key="file"]`
+        ) as HTMLInputElement | null
+      )?.focus();
+    }
   }
 
-  /** Sticky footer: Σ/avg for numeric columns, filled-count otherwise, plus a
-   * new-note row (type a name, Enter creates it in this folder). */
+  /**
+   * Empty draft row (top of thead / bottom of tfoot). UI-only: no note exists
+   * until it has a name and Enter commits it — typed values live in memory,
+   * so abandoning or clearing a draft can never lose file data.
+   */
+  private buildDraftRow(which: "top" | "bottom", parent: HTMLElement) {
+    const state = this.drafts[which];
+    const tr = parent.createEl("tr", { cls: `gridsense-draft gridsense-draft-${which}` });
+    tr.createEl("td", { cls: "gridsense-rownum", text: "＋" });
+    for (const c of this.cols) {
+      const td = tr.createEl("td", { cls: "gridsense-draft-cell" });
+      if (c.kind === "heading" || c.kind === "formula") continue;
+      const key = c.kind === "file" ? "file" : c.key;
+      const input = td.createEl("input", {
+        cls: "gridsense-draft-input",
+        type: "text",
+        attr: {
+          "data-draft-key": key,
+          placeholder: c.kind === "file" ? "new note name…" : c.key,
+        },
+      });
+      input.value = state[key] ?? "";
+      input.addEventListener("input", () => {
+        state[key] = input.value;
+      });
+      input.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") {
+          e.preventDefault();
+          void this.commitDraft(which);
+        }
+      });
+    }
+    // Hold refreshes while typing in the draft; release when focus leaves the
+    // whole row (so Tab between draft cells doesn't rebuild the table).
+    tr.addEventListener("focusin", () => {
+      this.editing = true;
+    });
+    tr.addEventListener("focusout", (e) => {
+      if (!tr.contains(e.relatedTarget as Node | null)) {
+        this.editing = false;
+        this.flushPendingRefresh();
+      }
+    });
+  }
+
+  private async commitDraft(which: "top" | "bottom") {
+    const state = this.drafts[which];
+    const name = (state["file"] ?? "").trim().replace(/[\\/:]+/g, "-");
+    if (!name) {
+      new Notice("GridSense: give the draft a note name (first column) to create it");
+      return;
+    }
+    const path = `${this.folder ? this.folder + "/" : ""}${name}.md`;
+    if (this.app.vault.getAbstractFileByPath(path)) {
+      new Notice("GridSense: a note with that name already exists here");
+      return;
+    }
+    let file: TFile;
+    try {
+      file = await this.app.vault.create(path, "---\n---\n");
+    } catch (err) {
+      new Notice(`GridSense: could not create note: ${String(err)}`);
+      return;
+    }
+    const writes: { file: TFile; key: string; value: unknown }[] = [];
+    for (const [key, text] of Object.entries(state)) {
+      if (key === "file" || !text.trim()) continue;
+      writes.push({ file, key, value: parseInput(text, undefined) });
+    }
+    if (writes.length) await this.engine.apply(`create ${name}`, writes);
+    this.pinnedNew.set(path, which);
+    this.drafts[which] = {};
+    this.editing = false;
+    this.draftFocusPending = which;
+    new Notice(`GridSense: created "${name}"`);
+    this.requestRender();
+  }
+
+  /** Sticky footer: the bottom draft row plus Σ/avg per column. */
   private buildFooter(table: HTMLElement) {
     const tfoot = table.createEl("tfoot");
-
-    const newTr = tfoot.createEl("tr", { cls: "gridsense-newrow" });
-    newTr.createEl("td", { cls: "gridsense-rownum", text: "＋" });
-    const newTd = newTr.createEl("td", {
-      attr: { colspan: String(this.cols.length) },
-    });
-    const input = newTd.createEl("input", {
-      cls: "gridsense-newnote",
-      type: "text",
-      attr: { placeholder: "new note name — Enter creates it here…" },
-    });
-    input.addEventListener("keydown", async (e) => {
-      e.stopPropagation();
-      if (e.key !== "Enter") return;
-      const name = input.value.trim().replace(/[\\/:]+/g, "-");
-      if (!name) return;
-      const path = `${this.folder ? this.folder + "/" : ""}${name}.md`;
-      if (this.app.vault.getAbstractFileByPath(path)) {
-        new Notice("GridSense: a note with that name already exists here");
-        return;
-      }
-      try {
-        await this.app.vault.create(path, "---\n---\n");
-        input.value = "";
-        new Notice(`GridSense: created "${name}"`);
-      } catch (err) {
-        new Notice(`GridSense: could not create note: ${String(err)}`);
-      }
-    });
-
+    this.buildDraftRow("bottom", tfoot);
     const sumTr = tfoot.createEl("tr", { cls: "gridsense-summary" });
     sumTr.createEl("td", { cls: "gridsense-rownum", text: "Σ" });
     for (const c of this.cols) {
@@ -678,6 +770,7 @@ export class GridView extends ItemView {
     const menu = new Menu();
     const setSort = (dir: "asc" | "desc" | null) => {
       this.cfg().sort = dir ? { key: c.key, dir } : null;
+      this.resetRowOrder();
       this.saveDebounced();
       void this.render();
     };
@@ -1174,7 +1267,14 @@ export class GridView extends ItemView {
   /** Re-create the store (fresh event wiring + full recompile). Used when
    * heading columns change out from under it, e.g. applying a named view. */
   reattachStore() {
+    this.resetRowOrder();
     this.attachStore();
+  }
+
+  /** Forget the frozen display order; next render re-derives it. */
+  private resetRowOrder() {
+    this.frozenPathOrder = null;
+    this.pinnedNew.clear();
   }
 
   async renameColumn(key: string, display: string) {

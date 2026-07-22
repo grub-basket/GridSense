@@ -308,17 +308,47 @@ td.gridsense-active {
   padding: 3px 8px;
 }
 
-.gridsense-newrow td {
-  bottom: calc(1.9em + 6px);
+.gridsense-draft td {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  padding: 0;
 }
 
-.gridsense-newnote {
+thead .gridsense-draft td {
+  position: sticky;
+  top: calc(1.9em + 8px);
+  z-index: 2;
+}
+
+tfoot .gridsense-draft td {
+  position: sticky;
+  bottom: calc(1.9em + 6px);
+  z-index: 2;
+}
+
+.gridsense-draft .gridsense-rownum {
+  color: var(--text-accent);
+  text-align: center;
+}
+
+.gridsense-draft-input {
   width: 100%;
   border: none;
   background: transparent;
   font: inherit;
   outline: none;
-  color: var(--text-muted);
+  color: var(--text-normal);
+  padding: 3px 8px;
+}
+
+.gridsense-draft-input::placeholder {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.gridsense-draft-input:focus {
+  background: var(--background-primary);
+  box-shadow: inset 0 0 0 2px var(--interactive-accent);
 }
 
 .gridsense-summary td {
