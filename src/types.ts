@@ -88,10 +88,13 @@ export interface GridSenseSettings {
   showHeadingNames: boolean;
   /** Replace Obsidian's native properties panel with the GridSense editor. */
   inlineProps: boolean;
+  /** Row cap applied to grids with no per-folder limit (0 = unlimited). */
+  defaultRowLimit: number;
 }
 
 export const DEFAULT_SETTINGS: GridSenseSettings = {
   folders: {},
   showHeadingNames: true,
   inlineProps: false,
+  defaultRowLimit: 0,
 };

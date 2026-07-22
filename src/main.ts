@@ -101,6 +101,22 @@ class GridSenseSettingTab extends PluginSettingTab {
         })
       );
     new Setting(this.containerEl)
+      .setName("Default row limit")
+      .setDesc(
+        "Applied to any grid without its own row limit (set per folder in ▦ columns & views). 0 = unlimited. The grid's row counter always shows when a limit is trimming rows."
+      )
+      .addText((t) => {
+        t.setPlaceholder("0");
+        t.setValue(String(this.plugin.settings.defaultRowLimit || 0));
+        t.onChange(async (v) => {
+          const n = parseInt(v);
+          if (!Number.isNaN(n) && n >= 0) {
+            this.plugin.settings.defaultRowLimit = n;
+            await this.plugin.saveSettings();
+          }
+        });
+      });
+    new Setting(this.containerEl)
       .setName("Show heading names in heading columns")
       .setDesc(
         "Heading-embed cells start with the heading itself (as a link into the note). Turn off to show just the section content with a small ↳ link."

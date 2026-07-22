@@ -316,7 +316,8 @@ export class GridView extends ItemView {
         }) * dir;
       });
     }
-    const limit = cfg.limit ?? DEFAULT_LIMIT;
+    // Per-folder limit wins; otherwise the plugin-wide default from settings.
+    const limit = cfg.limit ?? this.plugin.settings.defaultRowLimit ?? DEFAULT_LIMIT;
     this.truncated = limit > 0 ? Math.max(0, rows.length - limit) : 0;
     this.viewRows = limit > 0 ? rows.slice(0, limit) : rows;
 
@@ -1612,9 +1613,17 @@ class ColumnsModal extends Modal {
       .setName("Row limit")
       .setDesc("0 = unlimited (the default — virtualized rendering keeps big grids fast). The row counter shows when a limit is trimming the grid.")
       .addText((t) => {
-        t.setValue(String(cfg.limit ?? DEFAULT_LIMIT));
+        t.setPlaceholder(`plugin default (${this.view.plugin.settings.defaultRowLimit || "unlimited"})`);
+        t.setValue(cfg.limit !== undefined ? String(cfg.limit) : "");
         t.onChange(async (v) => {
-          const n = parseInt(v);
+          const trimmed = v.trim();
+          if (trimmed === "") {
+            delete cfg.limit;
+            await this.view.plugin.saveSettings();
+            await this.view.refresh();
+            return;
+          }
+          const n = parseInt(trimmed);
           if (!Number.isNaN(n) && n >= 0) {
             cfg.limit = n;
             await this.view.plugin.saveSettings();
