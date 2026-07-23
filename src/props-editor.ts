@@ -1,6 +1,10 @@
 import { App, Menu, Notice, TFile, setIcon } from "obsidian";
+import type GridSensePlugin from "./main";
 import { EditEngine, valueToDisplay } from "./edits";
 import { ZoomValueModal } from "./zoom";
+import { FormulaBuilderModal } from "./formula-builder";
+import { evaluateFormulas } from "./formulas";
+import { Row } from "./types";
 
 interface PropRow {
   key: string;
@@ -67,8 +71,12 @@ export class PropsEditor {
     private file: TFile,
     private container: HTMLElement,
     private engine: EditEngine,
-    private opts: { hint?: boolean } = {}
+    private opts: { hint?: boolean; plugin?: GridSensePlugin } = {}
   ) {}
+
+  private parentFolder(): string {
+    return this.file.parent?.path === "/" ? "" : this.file.parent?.path ?? "";
+  }
 
   mount() {
     this.container.addClass("gridsense-props-host");
@@ -180,6 +188,7 @@ export class PropsEditor {
         text: "No properties — click to add one",
       });
       empty.addEventListener("click", () => this.addRow());
+      void this.paintFormulaRows();
       return;
     }
     this.rows.forEach((row, i) => {
@@ -227,6 +236,66 @@ export class PropsEditor {
     setIcon(addIcon, "plus");
     add.createSpan({ text: " Add property" });
     add.addEventListener("click", () => this.addRow());
+    void this.paintFormulaRows();
+  }
+
+  /**
+   * Folder formulas rendered per-note: computed on the fly, never written to
+   * the file. Defining one here adds it as a column on the whole folder's
+   * grid too (formulas live in the folder config, shared by both surfaces).
+   */
+  private async paintFormulaRows() {
+    const plugin = this.opts.plugin;
+    const list = this.listEl;
+    if (!plugin || !list) return;
+    const cfg = plugin.folderConfig(this.parentFolder());
+    const specs = cfg.formulas ?? [];
+    const host = list.createDiv({ cls: "gridsense-props-formulas" });
+    if (specs.length) {
+      const fm = this.app.metadataCache.getFileCache(this.file)?.frontmatter ?? {};
+      const row: Row = { file: this.file, fm: { ...fm }, headings: {}, formulas: {} };
+      await evaluateFormulas(this.app, specs, [row]);
+      if (!host.isConnected) return; // repainted while we evaluated
+      for (const spec of specs) {
+        const rowEl = host.createDiv({ cls: "gridsense-props-row gridsense-props-formula" });
+        const iconEl = rowEl.createDiv({ cls: "gridsense-props-type", text: "ƒ" });
+        iconEl.setAttr("title", "Formula (computed, not stored in the note) — click for options");
+        iconEl.addEventListener("click", (e) => {
+          const menu = new Menu();
+          menu.addItem((m) =>
+            m.setTitle("Edit formula…").setIcon("pencil").onClick(() => {
+              new FormulaBuilderModal(this.app, plugin, this.parentFolder(), spec, () =>
+                this.load()
+              ).open();
+            })
+          );
+          menu.addItem((m) =>
+            m.setTitle(`Remove formula "${spec.name}"`).setIcon("trash").onClick(async () => {
+              cfg.formulas = (cfg.formulas ?? []).filter((f) => f.name !== spec.name);
+              await plugin.saveSettings();
+              this.load();
+            })
+          );
+          menu.showAtMouseEvent(e);
+        });
+        rowEl.createDiv({ cls: "gridsense-props-key", text: spec.name });
+        rowEl.createDiv({
+          cls: "gridsense-props-value gridsense-props-computed",
+          text: row.formulas?.[spec.name] ?? "",
+        });
+      }
+    }
+    const add = host.createDiv({ cls: "gridsense-props-add" });
+    const ic = add.createSpan();
+    setIcon(ic, "sigma");
+    add.createSpan({ text: " Add formula" });
+    add.setAttr(
+      "title",
+      "Computed for every note in this folder (and as a grid column) — stored in plugin config, not in notes"
+    );
+    add.addEventListener("click", () =>
+      new FormulaBuilderModal(this.app, plugin, this.parentFolder(), null, () => this.load()).open()
+    );
   }
 
   /** Lists render as always-visible chips with an × per item. */
@@ -398,8 +467,9 @@ export class PropsEditor {
     if (!Array.isArray(row.value)) return;
     const next = row.value.filter((_, i) => i !== idx);
     row.value = next;
+    // Keep the property even when the list empties — clearing ≠ deleting.
     await this.engine.apply(`remove item from ${row.key}`, [
-      { file: this.file, key: row.key, value: next.length ? next : null },
+      { file: this.file, key: row.key, value: next },
     ]);
     this.load();
   }
@@ -412,7 +482,7 @@ export class PropsEditor {
     }
     const value = row.value;
     await this.engine.apply(`rename ${row.key} → ${newKey}`, [
-      { file: this.file, key: row.key, value: null },
+      { file: this.file, key: row.key, value: undefined },
       { file: this.file, key: newKey, value: value ?? "" },
     ]);
     this.load();
@@ -430,7 +500,9 @@ export class PropsEditor {
   private async deleteRowAt(i: number) {
     const row = this.rows[i];
     if (!row || !row.key) return;
-    await this.engine.apply(`delete ${row.key}`, [{ file: this.file, key: row.key, value: null }]);
+    await this.engine.apply(`delete ${row.key}`, [
+      { file: this.file, key: row.key, value: undefined },
+    ]);
     new Notice(`GridSense: deleted "${row.key}" (⌘Z to undo)`);
     this.load();
   }

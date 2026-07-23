@@ -30,7 +30,7 @@ export default class GridSensePlugin extends Plugin {
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
         if (!file || file.extension !== "md") return false;
-        if (!checking) new NotePropsModal(this.app, file).open();
+        if (!checking) new NotePropsModal(this.app, file, this).open();
         return true;
       },
     });

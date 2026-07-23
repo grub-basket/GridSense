@@ -20,6 +20,12 @@ import { HistoryLogModal, appendHistory, readHistory } from "./history-log";
 import { CellRef, ColumnSpec, FolderConfig, FormulaSpec, Row, colId } from "./types";
 import { evaluateFormulas } from "./formulas";
 import { ZoomValueModal } from "./zoom";
+import {
+  ConfirmModal,
+  FormulaBuilderModal,
+  RenameFileModal,
+  propsInDir,
+} from "./formula-builder";
 
 export const GRID_VIEW_TYPE = "gridsense-grid";
 
@@ -476,7 +482,6 @@ export class GridView extends ItemView {
       grip.addEventListener("mousedown", (e) => this.startColResize(e, c, ci));
     });
 
-    this.buildDraftRow("top", thead);
     this.tbodyEl = table.createEl("tbody");
     this.winStart = -1;
     this.winEnd = -1;
@@ -636,6 +641,9 @@ export class GridView extends ItemView {
     this.winStart = start;
     this.winEnd = end;
     tbody.empty();
+    // Top draft row: part of the scrolling flow (before the spacer), styled
+    // identically to the bottom one — never sticky, never overlapping row 1.
+    this.buildDraftRow("top", tbody);
     const spTop = tbody.createEl("tr", { cls: "gridsense-spacer" });
     spTop.createEl("td", {
       attr: { colspan: String(this.cols.length + 1), style: `height: ${start * this.rowH}px` },
@@ -667,7 +675,23 @@ export class GridView extends ItemView {
   private renderRow(tbody: HTMLElement, ri: number) {
     const row = this.viewRows[ri];
     const tr = tbody.createEl("tr");
-    tr.createEl("td", { cls: "gridsense-rownum", text: String(ri + 1) });
+    const num = tr.createEl("td", { cls: "gridsense-rownum", text: String(ri + 1) });
+    num.setAttr("title", "Right-click: duplicate / rename note");
+    num.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      const menu = new Menu();
+      menu.addItem((i) =>
+        i.setTitle(`Duplicate "${row.file.basename}"`).setIcon("copy-plus").onClick(() =>
+          void this.duplicateNote(row.file)
+        )
+      );
+      menu.addItem((i) =>
+        i.setTitle("Rename note…").setIcon("pencil").onClick(() =>
+          new RenameFileModal(this.app, row.file).open()
+        )
+      );
+      menu.showAtMouseEvent(e);
+    });
     this.cols.forEach((c, ci) => {
       const td = tr.createEl("td", { cls: `gridsense-cell gridsense-col-${c.kind}` });
       td.dataset.row = String(ri);
@@ -700,6 +724,22 @@ export class GridView extends ItemView {
       a.addEventListener("click", (e) => {
         e.preventDefault();
         void this.app.workspace.getLeaf(e.metaKey || e.ctrlKey ? "tab" : false).openFile(row.file);
+      });
+      a.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const menu = new Menu();
+        menu.addItem((i) =>
+          i.setTitle("Rename note…").setIcon("pencil").onClick(() =>
+            new RenameFileModal(this.app, row.file).open()
+          )
+        );
+        menu.addItem((i) =>
+          i.setTitle(`Duplicate "${row.file.basename}"`).setIcon("copy-plus").onClick(() =>
+            void this.duplicateNote(row.file)
+          )
+        );
+        menu.showAtMouseEvent(e);
       });
       return;
     }
@@ -788,8 +828,16 @@ export class GridView extends ItemView {
           new RenameColumnModal(this, c.key).open();
         })
       );
+      menu.addItem((i) =>
+        i.setTitle(`Delete column "${c.key}"…`).setIcon("trash").onClick(() =>
+          this.confirmDeleteColumn(c.key)
+        )
+      );
     }
     menu.addSeparator();
+    menu.addItem((i) =>
+      i.setTitle("Add column…").setIcon("plus").onClick(() => new NewColumnModal(this).open())
+    );
     menu.addItem((i) =>
       i.setTitle("Manage columns…").setIcon("settings-2").onClick(() => this.openColumnsModal())
     );
@@ -832,9 +880,10 @@ export class GridView extends ItemView {
   private setSel(anchor: CellRef, head?: CellRef) {
     this.anchor = anchor;
     this.head = head ?? { ...anchor };
-    // Scroll the head cell into the virtual window before painting.
+    // Only scroll when the head cell truly isn't rendered — recentering on
+    // near-edge rows rebuilt the DOM mid-click and broke editing there.
     const hr = this.head.row;
-    if (this.scrollerEl && (hr < this.winStart + 2 || hr > this.winEnd - 3)) {
+    if (this.scrollerEl && !this.cellEl(hr, this.head.col)) {
       const target = Math.max(0, hr * this.rowH - this.scrollerEl.clientHeight / 2);
       this.scrollerEl.scrollTop = target;
       this.renderWindow(true);
@@ -1004,7 +1053,9 @@ export class GridView extends ItemView {
     for (const w of writes) {
       const row = byPath.get(w.file.path);
       if (row) {
-        if (w.value === null || w.value === undefined) delete row.fm[w.key];
+        // Mirror EditEngine semantics: undefined deletes the key, null keeps
+        // the property with an empty value.
+        if (w.value === undefined) delete row.fm[w.key];
         else row.fm[w.key] = w.value;
       }
     }
@@ -1277,6 +1328,65 @@ export class GridView extends ItemView {
     this.pinnedNew.clear();
   }
 
+  /** Duplicate a note: full content copy as "name (copy).md" (numbered when
+   * taken). TODO (logged): settings-driven naming template. */
+  async duplicateNote(file: TFile) {
+    const dir = file.parent?.path === "/" ? "" : file.parent?.path ?? "";
+    let name = `${file.basename} (copy)`;
+    let n = 2;
+    while (this.app.vault.getAbstractFileByPath(`${dir ? dir + "/" : ""}${name}.md`))
+      name = `${file.basename} (copy ${n++})`;
+    const path = `${dir ? dir + "/" : ""}${name}.md`;
+    try {
+      const content = await this.app.vault.read(file);
+      await this.app.vault.create(path, content);
+      new Notice(`GridSense: duplicated to "${name}"`);
+    } catch (e) {
+      new Notice(`GridSense: duplicate failed: ${String(e)}`);
+    }
+  }
+
+  /** Add a property (empty value, key kept) to every note in the grid. */
+  async addColumn(name: string) {
+    const key = name.trim();
+    if (!key) return;
+    if (["__proto__", "constructor", "prototype"].includes(key)) {
+      new Notice("GridSense: unsafe property name");
+      return;
+    }
+    const writes = this.store!.rows
+      .filter((r) => !(key in r.fm))
+      .map((r) => ({ file: r.file, key, value: null as unknown }));
+    if (!writes.length) {
+      new Notice(`GridSense: every note already has "${key}"`);
+      return;
+    }
+    this.applyLocal(writes);
+    const n = await this.engine.apply(`add column "${key}"`, writes);
+    new Notice(`GridSense: added "${key}" to ${n} note${n === 1 ? "" : "s"} (⌘Z to undo)`);
+    await this.render();
+  }
+
+  /** Delete a property from every note in the grid (confirmed + undoable). */
+  private confirmDeleteColumn(key: string) {
+    const count = this.store!.rows.filter((r) => key in r.fm).length;
+    new ConfirmModal(
+      this.app,
+      `Delete column "${key}"?`,
+      `This deletes the "${key}" property AND its values from ${count} note${count === 1 ? "" : "s"} in this grid. ⌘Z undoes it while this tab is open, and the edit log keeps a permanent record.`,
+      "Delete property",
+      async () => {
+        const writes = this.store!.rows
+          .filter((r) => key in r.fm)
+          .map((r) => ({ file: r.file, key, value: undefined as unknown }));
+        this.applyLocal(writes);
+        const n = await this.engine.apply(`delete column "${key}"`, writes);
+        new Notice(`GridSense: deleted "${key}" from ${n} note${n === 1 ? "" : "s"}`);
+        await this.render();
+      }
+    ).open();
+  }
+
   async renameColumn(key: string, display: string) {
     const cfg = this.cfg();
     cfg.rename = cfg.rename ?? {};
@@ -1433,74 +1543,6 @@ class ScopeSuggest extends AbstractInputSuggest<ScopeOption> {
   }
 }
 
-/** Generic type-to-filter suggest over a dynamic string list. */
-class ListSuggest extends AbstractInputSuggest<string> {
-  constructor(
-    app: App,
-    private inputEl: HTMLInputElement,
-    private itemsFn: () => string[]
-  ) {
-    super(app, inputEl);
-    this.limit = 0;
-  }
-
-  getSuggestions(query: string): string[] {
-    const q = query.trim().toLowerCase();
-    const items = this.itemsFn();
-    if (!q || items.some((i) => i.toLowerCase() === q)) return items;
-    return items.filter((i) => i.toLowerCase().includes(q));
-  }
-
-  renderSuggestion(item: string, el: HTMLElement): void {
-    el.setText(item);
-  }
-
-  selectSuggestion(item: string): void {
-    this.inputEl.value = item;
-    this.inputEl.dispatchEvent(new Event("input"));
-    this.close();
-  }
-}
-
-function allFolderPaths(app: App): string[] {
-  const out: string[] = [];
-  const walk = (f: TFolder) => {
-    out.push(f.path === "/" ? "" : f.path);
-    for (const c of f.children) if (c instanceof TFolder) walk(c);
-  };
-  walk(app.vault.getRoot());
-  return out.sort();
-}
-
-function propsInDir(app: App, dirPath: string): string[] {
-  const root = app.vault.getAbstractFileByPath(dirPath === "" ? "/" : dirPath);
-  const keys = new Set<string>();
-  const visit = (f: TFolder) => {
-    for (const c of f.children) {
-      if (c instanceof TFolder) visit(c);
-      else if (c instanceof TFile && c.extension === "md") {
-        const fm = app.metadataCache.getFileCache(c)?.frontmatter ?? {};
-        for (const k of Object.keys(fm)) if (k !== "position") keys.add(k);
-      }
-    }
-  };
-  if (root instanceof TFolder) visit(root);
-  return [...keys].sort();
-}
-
-function headingsInDir(app: App, dirPath: string): string[] {
-  const root = app.vault.getAbstractFileByPath(dirPath === "" ? "/" : dirPath);
-  const files: TFile[] = [];
-  const visit = (f: TFolder) => {
-    for (const c of f.children) {
-      if (c instanceof TFolder) visit(c);
-      else if (c instanceof TFile && c.extension === "md") files.push(c);
-    }
-  };
-  if (root instanceof TFolder) visit(root);
-  return allHeadings(app, files);
-}
-
 // -------------------------------------------------------------------- modals
 
 class FindReplaceModal extends Modal {
@@ -1651,6 +1693,12 @@ class ColumnsModal extends Modal {
       );
 
     c.createEl("div", { cls: "setting-item-heading", text: "Properties" });
+    new Setting(c).addButton((b) =>
+      b.setButtonText("Add property column…").onClick(() => {
+        this.close();
+        new NewColumnModal(this.view).open();
+      })
+    );
     for (const key of this.view.allPropertyKeys()) {
       new Setting(c).setName(key).addToggle((t) =>
         t.setValue(!cfg.hidden.includes(key)).onChange(async (v) => {
@@ -1691,7 +1739,9 @@ class ColumnsModal extends Modal {
         .addExtraButton((b) =>
           b.setIcon("pencil").setTooltip("Edit").onClick(() => {
             this.close();
-            new FormulaBuilderModal(this.view, f).open();
+            new FormulaBuilderModal(this.view.app, this.view.plugin, this.view.scopeFolder(), f, () =>
+              this.view.refresh()
+            ).open();
           })
         )
         .addExtraButton((b) =>
@@ -1704,7 +1754,9 @@ class ColumnsModal extends Modal {
     new Setting(c).addButton((b) =>
       b.setButtonText("Add formula column…").onClick(() => {
         this.close();
-        new FormulaBuilderModal(this.view, null).open();
+        new FormulaBuilderModal(this.view.app, this.view.plugin, this.view.scopeFolder(), null, () =>
+          this.view.refresh()
+        ).open();
       })
     );
 
@@ -1731,6 +1783,40 @@ class ColumnsModal extends Modal {
           }
         });
       });
+  }
+}
+
+class NewColumnModal extends Modal {
+  constructor(private view: GridView) {
+    super(view.app);
+  }
+
+  onOpen() {
+    this.titleEl.setText("Add column");
+    let value = "";
+    new Setting(this.contentEl)
+      .setName("Property name")
+      .setDesc("Adds this property (empty value) to every note in the grid — undoable.")
+      .addText((t) => {
+        t.onChange((v) => (value = v));
+        window.setTimeout(() => t.inputEl.focus(), 0);
+        t.inputEl.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && value.trim()) {
+            this.close();
+            void this.view.addColumn(value);
+          }
+        });
+      });
+    new Setting(this.contentEl).addButton((b) =>
+      b
+        .setButtonText("Add")
+        .setCta()
+        .onClick(() => {
+          if (!value.trim()) return;
+          this.close();
+          void this.view.addColumn(value);
+        })
+    );
   }
 }
 
@@ -1807,147 +1893,6 @@ class HeadingPickModal extends Modal {
           if (!value.trim()) return;
           this.close();
           this.onPick(value.trim());
-        })
-    );
-  }
-}
-
-/**
- * XLOOKUP / XMATCH / heading-mapping builder. Every field autocompletes:
- * directory, properties (of the searched directory or this grid), values.
- */
-class FormulaBuilderModal extends Modal {
-  private spec: FormulaSpec;
-
-  constructor(private view: GridView, existing: FormulaSpec | null) {
-    super(view.app);
-    this.spec = existing
-      ? { ...existing }
-      : {
-          name: "",
-          type: "xlookup",
-          lookupProp: "",
-          searchDir: "",
-          matchProp: "",
-          returnProp: "",
-          returnHeading: "",
-          notFound: "",
-        };
-  }
-
-  onOpen() {
-    this.titleEl.setText(this.spec.name ? `Edit formula — ${this.spec.name}` : "Add formula column");
-    const c = this.contentEl;
-    const app = this.app;
-
-    new Setting(c)
-      .setName("Column name")
-      .setDesc("Also the default lookup property")
-      .addText((t) => {
-        t.setValue(this.spec.name);
-        t.onChange((v) => (this.spec.name = v.trim()));
-        window.setTimeout(() => t.inputEl.focus(), 0);
-      });
-
-    new Setting(c).setName("Formula").addDropdown((d) => {
-      d.addOption("xlookup", "XLOOKUP — return a value from the matched note");
-      d.addOption("xmatch", "XMATCH — return the match's position in the folder");
-      d.setValue(this.spec.type).onChange((v) => (this.spec.type = v as "xlookup" | "xmatch"));
-    });
-
-    new Setting(c)
-      .setName("Lookup property (this grid)")
-      .setDesc("Row value to look up — leave empty to use the column name")
-      .addText((t) => {
-        t.setValue(this.spec.lookupProp);
-        t.setPlaceholder("defaults to column name");
-        new ListSuggest(app, t.inputEl, () => this.view.allPropertyKeys());
-        t.onChange((v) => (this.spec.lookupProp = v.trim()));
-      });
-
-    new Setting(c)
-      .setName("Search directory")
-      .setDesc("Folder whose notes are searched")
-      .addText((t) => {
-        t.setValue(this.spec.searchDir);
-        t.setPlaceholder("(vault root)");
-        new ListSuggest(app, t.inputEl, () => allFolderPaths(app));
-        t.onChange((v) => (this.spec.searchDir = v.trim()));
-      });
-
-    new Setting(c)
-      .setName("Match property (searched notes)")
-      .addText((t) => {
-        t.setValue(this.spec.matchProp);
-        new ListSuggest(app, t.inputEl, () => propsInDir(app, this.spec.searchDir));
-        t.onChange((v) => (this.spec.matchProp = v.trim()));
-      });
-
-    new Setting(c)
-      .setName("Return property")
-      .setDesc("XLOOKUP only — leave empty to return the note name")
-      .addText((t) => {
-        t.setValue(this.spec.returnProp ?? "");
-        new ListSuggest(app, t.inputEl, () => propsInDir(app, this.spec.searchDir));
-        t.onChange((v) => (this.spec.returnProp = v.trim()));
-      });
-
-    new Setting(c)
-      .setName("…or return heading section")
-      .setDesc("Heading-mapping: return the matched note's content under this heading")
-      .addText((t) => {
-        t.setValue(this.spec.returnHeading ?? "");
-        new ListSuggest(app, t.inputEl, () => headingsInDir(app, this.spec.searchDir));
-        t.onChange((v) => (this.spec.returnHeading = v.trim()));
-      });
-
-    new Setting(c)
-      .setName("If not found")
-      .addText((t) => {
-        t.setValue(this.spec.notFound);
-        t.setPlaceholder("(empty)");
-        new ListSuggest(app, t.inputEl, () => {
-          const prop = this.spec.returnProp;
-          if (!prop) return [];
-          const vals = new Set<string>();
-          for (const key of propsInDir(app, this.spec.searchDir)) void key;
-          const root = app.vault.getAbstractFileByPath(
-            this.spec.searchDir === "" ? "/" : this.spec.searchDir
-          );
-          const visit = (f: TFolder) => {
-            for (const ch of f.children) {
-              if (ch instanceof TFolder) visit(ch);
-              else if (ch instanceof TFile && ch.extension === "md") {
-                const v = app.metadataCache.getFileCache(ch)?.frontmatter?.[prop];
-                if (v !== undefined && v !== null) vals.add(valueToDisplay(v));
-              }
-            }
-          };
-          if (root instanceof TFolder) visit(root);
-          return [...vals].sort().slice(0, 200);
-        });
-        t.onChange((v) => (this.spec.notFound = v));
-      });
-
-    new Setting(c).addButton((b) =>
-      b
-        .setButtonText(this.spec.name ? "Save" : "Add")
-        .setCta()
-        .onClick(async () => {
-          if (!this.spec.name) {
-            new Notice("GridSense: the formula column needs a name");
-            return;
-          }
-          if (!this.spec.matchProp) {
-            new Notice("GridSense: pick a match property");
-            return;
-          }
-          const cfg = this.view.plugin.folderConfig(this.view.scopeFolder());
-          cfg.formulas = (cfg.formulas ?? []).filter((f) => f.name !== this.spec.name);
-          cfg.formulas.push(this.spec);
-          await this.view.plugin.saveSettings();
-          this.close();
-          await this.view.refresh();
         })
     );
   }

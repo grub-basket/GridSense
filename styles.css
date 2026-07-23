@@ -314,12 +314,6 @@ td.gridsense-active {
   padding: 0;
 }
 
-thead .gridsense-draft td {
-  position: sticky;
-  top: calc(1.9em + 8px);
-  z-index: 2;
-}
-
 tfoot .gridsense-draft td {
   position: sticky;
   bottom: calc(1.9em + 6px);
@@ -527,4 +521,16 @@ body.gridsense-inline-props .metadata-container .metadata-add-button {
   border-radius: 6px;
   font-size: var(--font-ui-smaller);
   cursor: pointer;
+}
+
+
+.gridsense-props-formula .gridsense-props-type {
+  font-weight: 700;
+  color: var(--interactive-accent);
+}
+
+.gridsense-props-computed {
+  color: var(--text-muted);
+  font-style: italic;
+  cursor: default;
 }

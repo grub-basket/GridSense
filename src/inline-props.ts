@@ -100,7 +100,7 @@ export class InlinePropsManager {
         entry
       )
     );
-    const editor = new PropsEditor(this.app, file, strip, engine);
+    const editor = new PropsEditor(this.app, file, strip, engine, { plugin: this.plugin });
     editor.mount();
     this.mounts.set(view, { strip, editor, filePath: file.path });
   }
