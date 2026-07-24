@@ -23,6 +23,7 @@ import { ZoomValueModal } from "./zoom";
 import {
   ConfirmModal,
   FormulaBuilderModal,
+  ListSuggest,
   RenameFileModal,
   propsInDir,
 } from "./formula-builder";
@@ -95,6 +96,7 @@ export class GridView extends ItemView {
     this.scope = new Scope(this.app.scope);
     const bind = (mods: string[], key: string, fn: () => void) =>
       this.scope!.register(mods as never, key, (e) => {
+        if (e.defaultPrevented) return false; // DOM fallback already handled it
         if (this.editing) return true; // let the cell editor keep its keys
         const target = e.target as HTMLElement | null;
         if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return true;
@@ -480,6 +482,41 @@ export class GridView extends ItemView {
       // Drag-resize handle.
       const grip = th.createSpan({ cls: "gridsense-col-grip" });
       grip.addEventListener("mousedown", (e) => this.startColResize(e, c, ci));
+    });
+    // "＋" header at the far right: add a column in place, with autocomplete
+    // over property names already used in this folder and across the vault.
+    const addTh = hr.createEl("th", { cls: "gridsense-addcol", text: "＋" });
+    addTh.setAttr("title", "Add a column (property on every note in this grid)");
+    addTh.addEventListener("click", () => {
+      if (addTh.querySelector("input")) return;
+      addTh.empty();
+      const input = addTh.createEl("input", {
+        cls: "gridsense-draft-input",
+        type: "text",
+        attr: { placeholder: "property name…" },
+      });
+      new ListSuggest(this.app, input, () => this.propertyNameSuggestions());
+      const done = () => {
+        addTh.empty();
+        addTh.setText("＋");
+      };
+      input.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "Enter" && input.value.trim()) {
+          const name = input.value;
+          done();
+          void this.addColumn(name);
+        } else if (e.key === "Escape") {
+          done();
+        }
+      });
+      input.addEventListener("blur", () => {
+        // Give the suggest click a beat to land before tearing down.
+        window.setTimeout(() => {
+          if (addTh.querySelector("input") === input && document.activeElement !== input) done();
+        }, 200);
+      });
+      input.focus();
     });
 
     this.tbodyEl = table.createEl("tbody");
@@ -974,8 +1011,25 @@ export class GridView extends ItemView {
         this.paintSelection();
         return;
     }
-    // ⌘D/⌘R/⌘F/⌘Z/⇧⌘Z/⌘Y are handled by the view's keymap Scope (see the
-    // constructor) so they beat Obsidian's own hotkeys; not duplicated here.
+    // Mod-key shortcuts are primarily handled by the view's keymap Scope
+    // (beats Obsidian's own hotkeys in the main window). This DOM fallback
+    // covers popout windows, where the scope isn't reliably active; the
+    // stopPropagation keeps Obsidian's window-level keymap (and a double
+    // scope run — it skips defaultPrevented events) out of the way.
+    if (mod) {
+      const k = e.key.toLowerCase();
+      const run = (fn: () => void) => {
+        e.preventDefault();
+        e.stopPropagation();
+        fn();
+      };
+      if (k === "d") return run(() => void this.fill("down"));
+      if (k === "r") return run(() => void this.fill("right"));
+      if (k === "f") return run(() => this.openFindReplace());
+      if (k === "z" && !e.shiftKey) return run(() => void this.undo());
+      if (k === "z" && e.shiftKey) return run(() => void this.engine.redo());
+      if (k === "y") return run(() => void this.engine.redo());
+    }
     if (!mod && e.key.length === 1 && this.head) {
       this.beginEdit(this.head.row, this.head.col, e.key);
       e.preventDefault();
@@ -1166,9 +1220,28 @@ export class GridView extends ItemView {
     this.pasteText(text);
   }
 
+  /**
+   * Parse spreadsheet clipboard text (Excel / Google Sheets / Numbers /
+   * LibreOffice) into cells. Tricks adapted from the Excel-to-Markdown-Table
+   * plugin: normalize \r\n and Unicode NEL/LS/PS row separators, and unwrap
+   * double-quoted cells whose embedded newlines would otherwise shred rows
+   * (Excel escapes literal quotes inside them as "").
+   */
+  private parseClipboardGrid(text: string): string[][] {
+    const SENTINEL = "\u0000";
+    let t = text.replace(/\r\n?/g, "\n").replace(/[\u0085\u2028\u2029]/g, "\n");
+    t = t.replace(/"([^\t"]*(?:""[^\t"]*)*\n[^\t"]*(?:""[^\t"]*)*)"/g, (_m, cell: string) =>
+      cell.replace(/\n/g, SENTINEL).replace(/""/g, '"')
+    );
+    return t
+      .replace(/\n$/, "")
+      .split("\n")
+      .map((l) => l.split("\t").map((c) => c.split(SENTINEL).join("\n")));
+  }
+
   private pasteText(text: string) {
     if (!this.head) return;
-    const grid = text.replace(/\n$/, "").split("\n").map((l) => l.split("\t"));
+    const grid = this.parseClipboardGrid(text);
     const start = this.selRange() ?? { r1: this.head.row, c1: this.head.col, r2: 0, c2: 0 };
     const writes: { file: TFile; key: string; value: unknown }[] = [];
     grid.forEach((line, dr) => {
@@ -1344,6 +1417,23 @@ export class GridView extends ItemView {
     } catch (e) {
       new Notice(`GridSense: duplicate failed: ${String(e)}`);
     }
+  }
+
+  /** Property-name suggestions: this grid's columns, then the whole vault's
+   * known properties (from Obsidian's type manager, defensively probed). */
+  propertyNameSuggestions(): string[] {
+    const seen = new Set<string>(this.store?.propColumns ?? []);
+    try {
+      const mtm = (
+        this.app as unknown as {
+          metadataTypeManager?: { getAllProperties?: () => Record<string, unknown> };
+        }
+      ).metadataTypeManager;
+      for (const k of Object.keys(mtm?.getAllProperties?.() ?? {})) seen.add(k);
+    } catch {
+      /* undocumented API — suggestions just stay folder-local */
+    }
+    return [...seen].sort();
   }
 
   /** Add a property (empty value, key kept) to every note in the grid. */
@@ -1798,6 +1888,7 @@ class NewColumnModal extends Modal {
       .setName("Property name")
       .setDesc("Adds this property (empty value) to every note in the grid — undoable.")
       .addText((t) => {
+        new ListSuggest(this.view.app, t.inputEl, () => this.view.propertyNameSuggestions());
         t.onChange((v) => (value = v));
         window.setTimeout(() => t.inputEl.focus(), 0);
         t.inputEl.addEventListener("keydown", (e) => {

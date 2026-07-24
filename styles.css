@@ -534,3 +534,16 @@ body.gridsense-inline-props .metadata-container .metadata-add-button {
   font-style: italic;
   cursor: default;
 }
+
+.gridsense-addcol {
+  color: var(--text-accent);
+  text-align: center;
+  cursor: pointer;
+  min-width: 40px;
+}
+.gridsense-addcol:hover {
+  background: var(--background-modifier-hover);
+}
+.gridsense-addcol input {
+  min-width: 140px;
+}
