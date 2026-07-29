@@ -1,15 +1,29 @@
-import { FuzzySuggestModal, Plugin, PluginSettingTab, Setting, TFolder } from "obsidian";
+import { FuzzySuggestModal, Notice, Plugin, PluginSettingTab, Setting, TFolder } from "obsidian";
 import { GRID_VIEW_TYPE, GridView } from "./grid-view";
 import { NotePropsModal } from "./note-props";
 import { InlinePropsManager } from "./inline-props";
 import { DEFAULT_SETTINGS, FolderConfig, GridSenseSettings } from "./types";
+import { ConfigFileStore } from "./config-file";
+import { GridTrash } from "./trash";
+import { ConfirmModal } from "./formula-builder";
 
 export default class GridSensePlugin extends Plugin {
   settings: GridSenseSettings = DEFAULT_SETTINGS;
   inlineProps: InlinePropsManager | null = null;
+  configFile: ConfigFileStore | null = null;
+  trash: GridTrash | null = null;
 
   async onload() {
     await this.loadSettings();
+    this.trash = new GridTrash(this.app, this);
+    this.configFile = new ConfigFileStore(this.app, this);
+    this.configFile.register();
+    // Vault-side config wins on load: it's the copy that travels with notes.
+    this.app.workspace.onLayoutReady(() => {
+      void this.configFile?.load().then((loaded) => {
+        if (loaded) this.refreshOpenGrids();
+      });
+    });
 
     this.addSettingTab(new GridSenseSettingTab(this));
     this.inlineProps = new InlinePropsManager(this.app, this);
@@ -32,6 +46,28 @@ export default class GridSensePlugin extends Plugin {
         if (!file || file.extension !== "md") return false;
         if (!checking) new NotePropsModal(this.app, file, this).open();
         return true;
+      },
+    });
+
+    this.addCommand({
+      id: "empty-gridsense-trash",
+      name: "Empty GridSense trash (move to Obsidian trash)",
+      callback: () => {
+        const files = this.trash?.list() ?? [];
+        if (!files.length) {
+          new Notice("GridSense: the GridSense trash is empty");
+          return;
+        }
+        new ConfirmModal(
+          this.app,
+          `Empty GridSense trash (${files.length} note${files.length === 1 ? "" : "s"})?`,
+          `Everything in "${this.trash?.folderPath()}" is handed to Obsidian's trash, following your "Deleted files" setting. GridSense's undo can no longer bring these back.`,
+          "Empty trash",
+          async () => {
+            const n = (await this.trash?.empty()) ?? 0;
+            new Notice(`GridSense: emptied ${n} note${n === 1 ? "" : "s"} into Obsidian's trash`);
+          }
+        ).open();
       },
     });
 
@@ -73,6 +109,15 @@ export default class GridSensePlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
+    this.configFile?.save();
+  }
+
+  /** Repaint every open grid (config changed underneath them). */
+  refreshOpenGrids() {
+    for (const leaf of this.app.workspace.getLeavesOfType(GRID_VIEW_TYPE)) {
+      const view = leaf.view;
+      if (view instanceof GridView) void view.refresh();
+    }
   }
 
   onunload() {
@@ -113,6 +158,51 @@ class GridSenseSettingTab extends PluginSettingTab {
             this.plugin.settings.defaultRowLimit = n;
             await this.plugin.saveSettings();
           }
+        });
+      });
+    this.containerEl.createEl("div", { cls: "setting-item-heading", text: "Sync" });
+    new Setting(this.containerEl)
+      .setName("Store grid config in the vault")
+      .setDesc(
+        "Per-grid setup (columns, widths, sort, filters, views, formulas) is normally kept in the plugin's data.json, which only travels if you sync your .obsidian folder. Turn this on to mirror it into a vault file that syncs with your notes; external updates are picked up automatically."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.syncConfigFile).onChange(async (v) => {
+          this.plugin.settings.syncConfigFile = v;
+          await this.plugin.saveSettings();
+          if (v) {
+            await this.plugin.configFile?.saveNow();
+            new Notice(`GridSense: grid config now stored at ${this.plugin.configFile?.path()}`);
+          }
+          this.display();
+        })
+      );
+    if (this.plugin.settings.syncConfigFile)
+      new Setting(this.containerEl)
+        .setName("Config file path")
+        .setDesc("Vault-relative. Keep the .json extension; make sure your sync includes this file type.")
+        .addText((t) => {
+          t.setPlaceholder("gridsense-config.json");
+          t.setValue(this.plugin.settings.configFilePath);
+          t.onChange(async (v) => {
+            this.plugin.settings.configFilePath = v.trim() || "gridsense-config.json";
+            await this.plugin.saveSettings();
+          });
+          t.inputEl.addEventListener("blur", () => void this.plugin.configFile?.saveNow());
+        });
+
+    this.containerEl.createEl("div", { cls: "setting-item-heading", text: "Notes & grids" });
+    new Setting(this.containerEl)
+      .setName("GridSense trash folder")
+      .setDesc(
+        "Deleting a row moves the note here instead of straight to Obsidian's trash, so it stays undoable and browsable. Empty it with the \"Empty GridSense trash\" command."
+      )
+      .addText((t) => {
+        t.setPlaceholder("GridSense Trash");
+        t.setValue(this.plugin.settings.trashFolder);
+        t.onChange(async (v) => {
+          this.plugin.settings.trashFolder = v.trim() || "GridSense Trash";
+          await this.plugin.saveSettings();
         });
       });
     new Setting(this.containerEl)

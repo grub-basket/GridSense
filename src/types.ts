@@ -92,6 +92,12 @@ export interface GridSenseSettings {
   inlineProps: boolean;
   /** Row cap applied to grids with no per-folder limit (0 = unlimited). */
   defaultRowLimit: number;
+  /** Mirror per-grid config into a vault file so it syncs with the notes. */
+  syncConfigFile: boolean;
+  /** Vault-relative path of that file. */
+  configFilePath: string;
+  /** Folder that row deletes move notes into (undoable, browsable). */
+  trashFolder: string;
 }
 
 export const DEFAULT_SETTINGS: GridSenseSettings = {
@@ -99,4 +105,7 @@ export const DEFAULT_SETTINGS: GridSenseSettings = {
   showHeadingNames: true,
   inlineProps: false,
   defaultRowLimit: 0,
+  syncConfigFile: false,
+  configFilePath: "gridsense-config.json",
+  trashFolder: "GridSense Trash",
 };

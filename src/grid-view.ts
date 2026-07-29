@@ -15,7 +15,7 @@ import {
 } from "obsidian";
 import type GridSensePlugin from "./main";
 import { GridStore } from "./store";
-import { EditEngine, parseInput, valueToDisplay } from "./edits";
+import { EditEngine, normalizeWikiBrackets, parseInput, valueToDisplay } from "./edits";
 import { allHeadings } from "./headings";
 import { HistoryLogModal, appendHistory, readHistory } from "./history-log";
 import { CellRef, ColumnSpec, FolderConfig, FormulaSpec, Row, colId } from "./types";
@@ -743,15 +743,20 @@ export class GridView extends ItemView {
             new ConfirmModal(
               this.app,
               `Delete "${row.file.basename}"?`,
-              "The note is moved to trash (your Obsidian 'Deleted files' setting decides which trash). This is NOT covered by GridSense's undo.",
-              "Move to trash",
+              `The note moves to "${this.plugin.trash?.folderPath()}" inside your vault, so ⌘Z brings it straight back. Empty that folder into Obsidian's trash with the "Empty GridSense trash" command.`,
+              "Move to GridSense trash",
               async () => {
-                try {
-                  await this.app.fileManager.trashFile(row.file);
-                  new Notice(`GridSense: moved "${row.file.basename}" to trash`);
-                } catch (err) {
-                  new Notice(`GridSense: delete failed: ${String(err)}`);
-                }
+                const res = await this.plugin.trash?.trash(row.file);
+                if (!res) return;
+                this.engine.pushUi(
+                  `delete note "${row.file.basename}"`,
+                  () => res.restore(),
+                  async () => {
+                    const back = this.app.vault.getAbstractFileByPath(res.from);
+                    if (back instanceof TFile) await this.plugin.trash?.trash(back);
+                  }
+                );
+                new Notice(`GridSense: "${row.file.basename}" moved to GridSense trash — ⌘Z to undo`);
               }
             ).open()
           )
@@ -1137,7 +1142,17 @@ export class GridView extends ItemView {
         .filter((n) => !typed || n.toLowerCase().includes(typed))
         .sort()
         .slice(0, 50)
-        .map((n) => input.value.replace(/\[\[[^\]]*$/, `[[${n}]]`));
+        .map((n) => normalizeWikiBrackets(input.value.replace(/\[\[[^\]]*$/, `[[${n}]]`)));
+    });
+    // Live guard while typing: [[[ → [[ as you go.
+    input.addEventListener("input", () => {
+      const fixed = normalizeWikiBrackets(input.value);
+      if (fixed !== input.value) {
+        const drop = input.value.length - fixed.length;
+        const caret = (input.selectionStart ?? fixed.length) - drop;
+        input.value = fixed;
+        input.setSelectionRange(Math.max(0, caret), Math.max(0, caret));
+      }
     });
     input.focus();
     if (seed === undefined) input.select();
@@ -1147,9 +1162,9 @@ export class GridView extends ItemView {
       const text = input.value;
       this.paintCell(td, ri, ci);
       this.contentEl.focus();
-      if (commit && text !== current) {
+      if (commit && normalizeWikiBrackets(text) !== current) {
         const row = this.rows[ri];
-        const value = parseInput(text, row.fm[c.key]);
+        const value = parseInput(normalizeWikiBrackets(text), row.fm[c.key]);
         row.fm[c.key] = value === null ? undefined : value; // optimistic
         this.paintCell(td, ri, ci);
         void this.engine.apply(`edit ${c.key}`, [{ file: row.file, key: c.key, value }]);

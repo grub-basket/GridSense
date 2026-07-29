@@ -1,6 +1,6 @@
 import { App, Menu, Notice, TFile, setIcon } from "obsidian";
 import type GridSensePlugin from "./main";
-import { EditEngine, valueToDisplay } from "./edits";
+import { EditEngine, normalizeWikiBrackets, valueToDisplay } from "./edits";
 import { ZoomValueModal } from "./zoom";
 import { FormulaBuilderModal } from "./formula-builder";
 import { evaluateFormulas } from "./formulas";
@@ -461,7 +461,7 @@ export class PropsEditor {
   // ------------------------------------------------------------------ writes
 
   private async setValue(row: PropRow, text: string) {
-    const value = this.parseByType(row.key, text, row.value);
+    const value = this.parseByType(row.key, normalizeWikiBrackets(text), row.value);
     row.value = value;
     await this.engine.apply(`edit ${row.key}`, [{ file: this.file, key: row.key, value }]);
     this.load();
