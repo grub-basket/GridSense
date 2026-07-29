@@ -355,9 +355,10 @@ tfoot .gridsense-draft td {
 
 /* ------------------------- inline properties takeover -------------------- */
 
-body.gridsense-inline-props .metadata-container .metadata-properties,
-body.gridsense-inline-props .metadata-container .metadata-properties-heading,
-body.gridsense-inline-props .metadata-container .metadata-add-button {
+/* Applied per properties container so per-note overrides can differ. */
+.metadata-container.gridsense-inline-props .metadata-properties,
+.metadata-container.gridsense-inline-props .metadata-properties-heading,
+.metadata-container.gridsense-inline-props .metadata-add-button {
   display: none;
 }
 
@@ -583,4 +584,81 @@ body.gridsense-inline-props .metadata-container .metadata-add-button {
 .gridsense-strip-toggle:hover {
   color: var(--text-accent);
   border-color: var(--text-accent);
+}
+
+
+/* -------------------- freeze panes + hidden-items warning ---------------- */
+
+.gridsense-table th.gridsense-frozen-col,
+.gridsense-table td.gridsense-frozen-col {
+  position: sticky;
+  z-index: 3;
+  background: var(--background-primary);
+}
+
+.gridsense-table th.gridsense-frozen-col {
+  z-index: 5;
+  background: var(--background-secondary);
+}
+
+.gridsense-table td.gridsense-frozen-col.gridsense-rownum {
+  background: var(--background-secondary);
+}
+
+.gridsense-frozen-row td {
+  position: sticky;
+  z-index: 2;
+  /* Opaque: scrolled rows must never show through a frozen row. */
+  background-color: var(--background-primary);
+  box-shadow: 0 1px 0 var(--background-modifier-border);
+  border: 1px solid var(--background-modifier-border);
+  padding: 3px 8px;
+}
+
+.gridsense-frozen-row td.gridsense-frozen-col {
+  z-index: 4;
+}
+
+.gridsense-hidden-warn {
+  color: var(--text-error);
+  border: 1px solid var(--text-error);
+  background: transparent;
+  border-radius: 6px;
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 8px;
+}
+.gridsense-hidden-warn:hover {
+  background: var(--background-modifier-error-hover, transparent);
+}
+
+.gridsense-history-restore {
+  font-size: var(--font-ui-smaller);
+  padding: 0 6px;
+  margin-left: auto;
+  cursor: pointer;
+}
+.gridsense-history-restored {
+  color: var(--text-success, var(--color-green));
+}
+
+.gridsense-import-preview {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-ui-smaller);
+  margin-bottom: 8px;
+}
+.gridsense-import-preview th,
+.gridsense-import-preview td {
+  border: 1px solid var(--background-modifier-border);
+  padding: 2px 6px;
+  text-align: left;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gridsense-import-modal .gridsense-zoom-text {
+  min-height: 22vh;
 }

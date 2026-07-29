@@ -1,5 +1,5 @@
 import { App, TFile, TFolder } from "obsidian";
-import { FormulaSpec, Row } from "./types";
+import { Condition, FormulaSpec, Row } from "./types";
 import { extractHeadingSection } from "./headings";
 import { valueToDisplay } from "./edits";
 
@@ -37,6 +37,48 @@ function buildIndex(app: App, spec: FormulaSpec): FormulaIndex {
   return { byValue };
 }
 
+/** Compare one row's property against a condition. */
+export function matches(row: Row, c: Condition): boolean {
+  const raw = row.fm[c.prop];
+  const empty = raw === undefined || raw === null || raw === "" ||
+    (Array.isArray(raw) && raw.length === 0);
+  if (c.op === "empty") return empty;
+  if (c.op === "not-empty") return !empty;
+  const left = valueToDisplay(raw);
+  const right = c.value ?? "";
+  const ln = Number(left);
+  const rn = Number(right);
+  const numeric = left !== "" && right !== "" && !Number.isNaN(ln) && !Number.isNaN(rn);
+  switch (c.op) {
+    case "=":
+      return numeric ? ln === rn : left.toLowerCase() === right.toLowerCase();
+    case "!=":
+      return numeric ? ln !== rn : left.toLowerCase() !== right.toLowerCase();
+    case ">":
+      return numeric ? ln > rn : left > right;
+    case "<":
+      return numeric ? ln < rn : left < right;
+    case ">=":
+      return numeric ? ln >= rn : left >= right;
+    case "<=":
+      return numeric ? ln <= rn : left <= right;
+    case "contains":
+      return left.toLowerCase().includes(right.toLowerCase());
+    default:
+      return false;
+  }
+}
+
+/** Rows that COUNTIF/SUMIF scan: another folder if set, else the grid itself. */
+function scopeRows(app: App, spec: FormulaSpec, rows: Row[]): Row[] {
+  if (!spec.countDir) return rows;
+  return filesInDir(app, spec.countDir).map((file) => ({
+    file,
+    fm: { ...(app.metadataCache.getFileCache(file)?.frontmatter ?? {}) },
+    headings: {},
+  }));
+}
+
 /**
  * Evaluate every formula column for the given rows, writing results into
  * row.formulas[spec.name]. XLOOKUP returns a property (or a heading-section
@@ -50,6 +92,59 @@ export async function evaluateFormulas(
   rows: Row[]
 ): Promise<void> {
   for (const spec of specs) {
+    // Excel-style formulas that don't need a lookup index.
+    if (spec.type !== "xlookup" && spec.type !== "xmatch") {
+      const conds = spec.conditions ?? [];
+      if (spec.type === "countif" || spec.type === "sumif") {
+        // Aggregates: one value for the whole column (like a spreadsheet's
+        // COUNTIF over a range), computed once and shown on every row.
+        const pool = scopeRows(app, spec, rows);
+        const hits = pool.filter((r) => conds.every((c) => matches(r, c)));
+        let out: string;
+        if (spec.type === "countif") out = String(hits.length);
+        else {
+          const total = hits.reduce((sum, r) => {
+            const n = Number(valueToDisplay(r.fm[spec.sumProp ?? ""]));
+            return sum + (Number.isNaN(n) ? 0 : n);
+          }, 0);
+          out = String(Math.round(total * 1000) / 1000);
+        }
+        for (const row of rows) {
+          row.formulas = row.formulas ?? {};
+          row.formulas[spec.name] = out;
+        }
+        continue;
+      }
+      for (const row of rows) {
+        row.formulas = row.formulas ?? {};
+        if (spec.type === "concat") {
+          const sep = spec.separator ?? " ";
+          row.formulas[spec.name] = (spec.parts ?? [])
+            .map((p) => {
+              // Quoted parts are literals; file.* are pseudo-properties;
+              // everything else is a frontmatter property name.
+              if (/^(["']).*\1$/.test(p)) return p.slice(1, -1);
+              if (p === "file.basename" || p === "file.name") return row.file.basename;
+              if (p === "file.path") return row.file.path;
+              if (p === "file.folder") return row.file.parent?.path ?? "";
+              return valueToDisplay(row.fm[p]);
+            })
+            .filter((v) => v !== "")
+            .join(sep);
+        } else if (spec.type === "if") {
+          const ok = conds.length > 0 && conds.every((c) => matches(row, c));
+          row.formulas[spec.name] = ok ? spec.thenValue ?? "true" : spec.elseValue ?? "";
+        } else if (spec.type === "and") {
+          const ok = conds.length > 0 && conds.every((c) => matches(row, c));
+          row.formulas[spec.name] = ok ? spec.thenValue ?? "true" : spec.elseValue ?? "false";
+        } else if (spec.type === "ifs") {
+          // First matching condition wins; notFound is the fallback.
+          const hit = conds.find((c) => matches(row, c));
+          row.formulas[spec.name] = hit ? hit.then ?? "true" : spec.notFound ?? "";
+        }
+      }
+      continue;
+    }
     const index = buildIndex(app, spec);
     const headingCache = new Map<string, string>();
     for (const row of rows) {

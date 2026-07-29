@@ -25,6 +25,19 @@ export class InlinePropsManager {
 
   constructor(private app: App, private plugin: GridSensePlugin) {}
 
+  /** Effective takeover state for one note: per-note override beats global. */
+  activeFor(path: string): boolean {
+    const o = this.plugin.settings.inlinePropsOverrides[path];
+    return o === undefined ? this.plugin.settings.inlineProps : o;
+  }
+
+  async setOverride(path: string, on: boolean | null) {
+    if (on === null) delete this.plugin.settings.inlinePropsOverrides[path];
+    else this.plugin.settings.inlinePropsOverrides[path] = on;
+    await this.plugin.saveSettings();
+    this.apply();
+  }
+
   /** Wire workspace events once; both modes (takeover on/off) need them. */
   start() {
     if (this.detachFns.length) return;
@@ -44,11 +57,9 @@ export class InlinePropsManager {
 
   /** Reflect the current setting: takeover strip, or just the toggle button. */
   apply() {
-    document.body.toggleClass(BODY_CLASS, this.plugin.settings.inlineProps);
-    if (!this.plugin.settings.inlineProps) {
-      for (const [, m] of this.mounts) m.strip.remove();
-      this.mounts.clear();
-    }
+    // Per-note overrides mean the takeover can differ view-to-view, so the
+    // native panel is hidden per container rather than via a body class.
+    document.body.removeClass(BODY_CLASS);
     this.mountAll();
   }
 
@@ -58,7 +69,6 @@ export class InlinePropsManager {
   }
 
   disable() {
-    document.body.removeClass(BODY_CLASS);
     for (const [, m] of this.mounts) m.strip.remove();
     this.mounts.clear();
     this.mountAll(); // leaves the "GridSense properties" switch-back button
@@ -66,6 +76,7 @@ export class InlinePropsManager {
 
   stop() {
     document.body.removeClass(BODY_CLASS);
+    document.querySelectorAll(".metadata-container").forEach((el) => el.removeClass(BODY_CLASS));
     this.detachFns.forEach((fn) => fn());
     this.detachFns = [];
     for (const [, m] of this.mounts) m.strip.remove();
@@ -86,8 +97,20 @@ export class InlinePropsManager {
       const view = leaf.view;
       if (!(view instanceof MarkdownView) || !view.file) continue;
       seen.add(view);
-      if (this.plugin.settings.inlineProps) this.ensureMount(view, view.file);
-      else this.ensureOffToggle(view);
+      const host = view.containerEl.querySelector(".metadata-container") as HTMLElement | null;
+      const on = this.activeFor(view.file.path);
+      host?.toggleClass(BODY_CLASS, on);
+      if (on) {
+        view.containerEl.querySelectorAll(".gridsense-enable-toggle").forEach((el) => el.remove());
+        this.ensureMount(view, view.file);
+      } else {
+        const m = this.mounts.get(view);
+        if (m) {
+          m.strip.remove();
+          this.mounts.delete(view);
+        }
+        this.ensureOffToggle(view);
+      }
     }
     // Drop mounts whose views are gone.
     for (const [view, m] of [...this.mounts]) {
@@ -109,13 +132,9 @@ export class InlinePropsManager {
     });
     btn.setAttr("title", "Use GridSense's property editor for notes (beta)");
     host.prepend(btn);
+    const path = view.file?.path;
     btn.addEventListener("click", async () => {
-      this.plugin.settings.inlineProps = true;
-      await this.plugin.saveSettings();
-      document
-        .querySelectorAll(".gridsense-enable-toggle")
-        .forEach((el) => el.remove());
-      this.apply();
+      if (path) await this.setOverride(path, true);
     });
   }
 
@@ -149,10 +168,8 @@ export class InlinePropsManager {
     });
     toggle.setAttr("title", "Switch back to Obsidian's properties panel (GridSense setting)");
     toggle.addEventListener("click", async () => {
-      this.plugin.settings.inlineProps = false;
-      await this.plugin.saveSettings();
-      this.disable();
-      new Notice("GridSense: switched to Obsidian's properties panel");
+      await this.setOverride(file.path, false);
+      new Notice(`GridSense: "${file.basename}" now uses Obsidian's properties panel`);
     });
     const engine = new EditEngine(this.app, (entry) =>
       void appendHistory(

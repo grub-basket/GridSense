@@ -44,10 +44,29 @@ export interface HistoryEntry {
 
 export type SortDir = "asc" | "desc";
 
+export type FormulaType =
+  | "xlookup"
+  | "xmatch"
+  | "countif"
+  | "sumif"
+  | "concat"
+  | "if"
+  | "ifs"
+  | "and";
+
+export interface Condition {
+  /** Property on the row being evaluated. */
+  prop: string;
+  op: "=" | "!=" | ">" | "<" | ">=" | "<=" | "contains" | "empty" | "not-empty";
+  value: string;
+  /** Result for IFS (ignored by other formula types). */
+  then?: string;
+}
+
 export interface FormulaSpec {
   /** Column title, also the default lookup property. */
   name: string;
-  type: "xlookup" | "xmatch";
+  type: FormulaType;
   /** Property on THIS row whose value we look up (defaults to name). */
   lookupProp: string;
   /** Folder whose notes are searched. */
@@ -60,6 +79,18 @@ export interface FormulaSpec {
   returnHeading?: string;
   /** Value shown when nothing matches. */
   notFound: string;
+  /** COUNTIF/SUMIF/IF/IFS/AND: conditions evaluated against each row. */
+  conditions?: Condition[];
+  /** SUMIF: property to total. COUNTIF ignores it. */
+  sumProp?: string;
+  /** CONCAT: properties joined, and the separator between them. */
+  parts?: string[];
+  separator?: string;
+  /** IF/AND: values for the true / false branches. */
+  thenValue?: string;
+  elseValue?: string;
+  /** Scope for COUNTIF/SUMIF: which folder's notes to count (default: grid). */
+  countDir?: string;
 }
 
 export interface FolderConfig {
@@ -74,6 +105,9 @@ export interface FolderConfig {
   wrap?: boolean;
   /** Max auto-computed column width in px for this grid (drag-resize wins). */
   widthCap?: number;
+  /** Freeze the first N columns / rows in place while scrolling. */
+  freezeCols?: number;
+  freezeRows?: number;
   limit?: number;
   formulas?: FormulaSpec[];
   /** Display order of columns (colIds); unlisted columns keep natural order. */
@@ -98,6 +132,8 @@ export interface GridSenseSettings {
   configFilePath: string;
   /** Folder that row deletes move notes into (undoable, browsable). */
   trashFolder: string;
+  /** Per-note overrides for the properties takeover (path → on/off). */
+  inlinePropsOverrides: Record<string, boolean>;
 }
 
 export const DEFAULT_SETTINGS: GridSenseSettings = {
@@ -108,4 +144,5 @@ export const DEFAULT_SETTINGS: GridSenseSettings = {
   syncConfigFile: false,
   configFilePath: "gridsense-config.json",
   trashFolder: "GridSense Trash",
+  inlinePropsOverrides: {},
 };

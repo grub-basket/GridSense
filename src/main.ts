@@ -1,10 +1,11 @@
-import { FuzzySuggestModal, Notice, Plugin, PluginSettingTab, Setting, TFolder } from "obsidian";
+import { FuzzySuggestModal, Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder } from "obsidian";
 import { GRID_VIEW_TYPE, GridView } from "./grid-view";
 import { NotePropsModal } from "./note-props";
 import { InlinePropsManager } from "./inline-props";
 import { DEFAULT_SETTINGS, FolderConfig, GridSenseSettings } from "./types";
 import { ConfigFileStore } from "./config-file";
 import { GridTrash } from "./trash";
+import { PasteImportModal } from "./import";
 import { ConfirmModal } from "./formula-builder";
 
 export default class GridSensePlugin extends Plugin {
@@ -31,6 +32,8 @@ export default class GridSensePlugin extends Plugin {
     // "GridSense properties" switch button above Obsidian's own.
     this.app.workspace.onLayoutReady(() => this.inlineProps?.start());
     this.registerView(GRID_VIEW_TYPE, (leaf) => new GridView(leaf, this));
+    // .grid files: saved grid views, opened like any other document.
+    this.registerExtensions(["grid"], GRID_VIEW_TYPE);
 
     this.addCommand({
       id: "open-grid-for-folder",
@@ -45,6 +48,94 @@ export default class GridSensePlugin extends Plugin {
         const file = this.app.workspace.getActiveFile();
         if (!file || file.extension !== "md") return false;
         if (!checking) new NotePropsModal(this.app, file, this).open();
+        return true;
+      },
+    });
+
+    // Grid actions as commands so they can take user hotkeys.
+    const gridCmd = (id: string, name: string, fn: (v: GridView) => void) =>
+      this.addCommand({
+        id,
+        name,
+        checkCallback: (checking) => {
+          const view = this.app.workspace.getActiveViewOfType(GridView);
+          if (!view) return false;
+          if (!checking) fn(view);
+          return true;
+        },
+      });
+    gridCmd("grid-fill-down", "Grid: fill down", (v) => v.commandFill("down"));
+    gridCmd("grid-fill-right", "Grid: fill right", (v) => v.commandFill("right"));
+    gridCmd("grid-find-replace", "Grid: find & replace…", (v) => v.commandFindReplace());
+    gridCmd("grid-undo", "Grid: undo", (v) => v.commandUndo());
+    gridCmd("grid-redo", "Grid: redo", (v) => v.commandRedo());
+    gridCmd("grid-toggle-wrap", "Grid: toggle word wrap", (v) => v.commandToggleWrap());
+    gridCmd("grid-add-column", "Grid: add column…", (v) => v.commandAddColumn());
+    gridCmd("grid-columns", "Grid: columns & views…", (v) => v.commandColumns());
+    gridCmd("grid-history", "Grid: edit history…", (v) => void v.commandHistory());
+    gridCmd("grid-recompile", "Grid: recompile from notes", (v) => v.commandRecompile());
+
+    this.addCommand({
+      id: "save-grid-file",
+      name: "Save this grid as a .grid file…",
+      checkCallback: (checking) => {
+        const view = this.app.workspace.getActiveViewOfType(GridView);
+        if (!view) return false;
+        if (!checking) void this.saveGridFile(view.scopeFolder());
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "paste-import",
+      name: "Import notes from a spreadsheet paste…",
+      callback: () => {
+        const view = this.app.workspace.getActiveViewOfType(GridView);
+        new PasteImportModal(this.app, this, view ? view.scopeFolder() : "").open();
+      },
+    });
+
+    this.addCommand({
+      id: "toggle-inline-props",
+      name: "Toggle GridSense properties panel (all notes)",
+      callback: async () => {
+        this.settings.inlineProps = !this.settings.inlineProps;
+        await this.saveSettings();
+        this.inlineProps?.apply();
+        new Notice(
+          `GridSense properties panel: ${this.settings.inlineProps ? "on" : "off"} by default`
+        );
+      },
+    });
+
+    this.addCommand({
+      id: "toggle-inline-props-note",
+      name: "Toggle GridSense properties panel (this note)",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        if (!file || file.extension !== "md" || !this.inlineProps) return false;
+        if (!checking) {
+          const now = this.inlineProps.activeFor(file.path);
+          void this.inlineProps.setOverride(file.path, !now).then(() =>
+            new Notice(
+              `GridSense properties for "${file.basename}": ${!now ? "on" : "off"} (overrides the default)`
+            )
+          );
+        }
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "clear-inline-props-override",
+      name: "Clear GridSense properties override (this note)",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        if (!file || this.settings.inlinePropsOverrides[file.path] === undefined) return false;
+        if (!checking)
+          void this.inlineProps?.setOverride(file.path, null).then(() =>
+            new Notice("GridSense: note follows the default properties panel again")
+          );
         return true;
       },
     });
@@ -84,6 +175,12 @@ export default class GridSensePlugin extends Plugin {
             .setIcon("table")
             .onClick(() => void this.openGrid(file.path))
         );
+        menu.addItem((item) =>
+          item
+            .setTitle("Save as .grid file")
+            .setIcon("save")
+            .onClick(() => void this.saveGridFile(file.path === "/" ? "" : file.path))
+        );
       })
     );
   }
@@ -110,6 +207,45 @@ export default class GridSensePlugin extends Plugin {
   async saveSettings() {
     await this.saveData(this.settings);
     this.configFile?.save();
+  }
+
+  /** Write a .grid pointer file for a folder and open it. */
+  async saveGridFile(folder: string): Promise<void> {
+    const base = (folder.split("/").pop() || "vault").trim();
+    // Parent folder of the scope — "" for a top-level folder (lastIndexOf
+    // returns -1 there, and slice(0, -1) would eat the last character).
+    const cut = folder.lastIndexOf("/");
+    const dir = cut > 0 ? folder.slice(0, cut) : "";
+    let path = `${dir ? dir + "/" : ""}${base}.grid`;
+    let n = 2;
+    while (this.app.vault.getAbstractFileByPath(path))
+      path = `${dir ? dir + "/" : ""}${base} ${n++}.grid`;
+    try {
+      const file = await this.app.vault.create(
+        path,
+        JSON.stringify({ gridsense: this.manifest.version, folder }, null, 2)
+      );
+      await this.app.workspace.getLeaf("tab").openFile(file as TFile);
+      new Notice(`GridSense: saved "${path}"`);
+    } catch (e) {
+      new Notice(`GridSense: couldn't save the .grid file — ${String(e)}`);
+    }
+  }
+
+  /** Property names seen anywhere in the vault (import/column mapping). */
+  knownPropertyNames(): string[] {
+    const out = new Set<string>();
+    try {
+      const mtm = (
+        this.app as unknown as {
+          metadataTypeManager?: { getAllProperties?: () => Record<string, unknown> };
+        }
+      ).metadataTypeManager;
+      for (const k of Object.keys(mtm?.getAllProperties?.() ?? {})) out.add(k);
+    } catch {
+      /* undocumented API */
+    }
+    return [...out].sort();
   }
 
   /** Repaint every open grid (config changed underneath them). */

@@ -1,6 +1,6 @@
 import { AbstractInputSuggest, App, Modal, Notice, Setting, TFile, TFolder } from "obsidian";
 import type GridSensePlugin from "./main";
-import { FormulaSpec } from "./types";
+import { Condition, FormulaSpec } from "./types";
 import { valueToDisplay } from "./edits";
 import { allHeadings } from "./headings";
 
@@ -114,10 +114,26 @@ export class FormulaBuilderModal extends Modal {
       });
 
     new Setting(c).setName("Formula").addDropdown((d) => {
-      d.addOption("xlookup", "XLOOKUP — return a value from the matched note");
-      d.addOption("xmatch", "XMATCH — return the match's position in the folder");
-      d.setValue(this.spec.type).onChange((v) => (this.spec.type = v as "xlookup" | "xmatch"));
+      d.addOption("xlookup", "XLOOKUP — value from a matched note");
+      d.addOption("xmatch", "XMATCH — position of the matched note");
+      d.addOption("countif", "COUNTIF — how many notes meet conditions");
+      d.addOption("sumif", "SUMIF — total a property where conditions hold");
+      d.addOption("concat", "CONCAT — join properties and text");
+      d.addOption("if", "IF — one value when conditions hold, another when not");
+      d.addOption("ifs", "IFS — first matching condition wins");
+      d.addOption("and", "AND — true only when every condition holds");
+      d.setValue(this.spec.type).onChange((v) => {
+        this.spec.type = v as FormulaSpec["type"];
+        this.contentEl.empty();
+        this.onOpen();
+      });
     });
+
+    // Fields differ per formula; lookups keep the original layout.
+    if (this.spec.type !== "xlookup" && this.spec.type !== "xmatch") {
+      this.renderSimpleFields(c);
+      return;
+    }
 
     new Setting(c)
       .setName("Lookup property (this grid)")
@@ -190,6 +206,168 @@ export class FormulaBuilderModal extends Modal {
           }
           if (!this.spec.matchProp) {
             new Notice("GridSense: pick a match property");
+            return;
+          }
+          const cfg = this.plugin.folderConfig(this.folder);
+          cfg.formulas = (cfg.formulas ?? []).filter((f) => f.name !== this.spec.name);
+          cfg.formulas.push(this.spec);
+          await this.plugin.saveSettings();
+          this.close();
+          await this.onSaved();
+        })
+    );
+  }
+
+  /** Condition/parts UI for COUNTIF, SUMIF, CONCAT, IF, IFS and AND. */
+  private renderSimpleFields(c: HTMLElement) {
+    const app = this.app;
+    const props = () => propsInDir(app, this.folder);
+    const type = this.spec.type;
+
+    if (type === "concat") {
+      this.spec.parts = this.spec.parts ?? [];
+      new Setting(c)
+        .setName("Separator")
+        .setDesc("Placed between the joined parts.")
+        .addText((t) => {
+          t.setPlaceholder("space");
+          t.setValue(this.spec.separator ?? " ");
+          t.onChange((v) => (this.spec.separator = v));
+        });
+      c.createEl("div", { cls: "setting-item-heading", text: "Parts" });
+      c.createDiv({
+        cls: "gridsense-props-hint",
+        text:
+          'A property name uses that property\'s value; file.basename / file.path / file.folder work too; wrap text in quotes for a literal, e.g. "—".',
+      });
+      const redraw = () => {
+        this.contentEl.empty();
+        this.onOpen();
+      };
+      this.spec.parts.forEach((part, i) => {
+        new Setting(c)
+          .setName(`Part ${i + 1}`)
+          .addText((t) => {
+            t.setValue(part);
+            new ListSuggest(app, t.inputEl, () => [
+              "file.basename",
+              "file.path",
+              "file.folder",
+              ...props(),
+            ]);
+            t.onChange((v) => (this.spec.parts![i] = v));
+          })
+          .addExtraButton((b) =>
+            b.setIcon("trash").onClick(() => {
+              this.spec.parts!.splice(i, 1);
+              redraw();
+            })
+          );
+      });
+      new Setting(c).addButton((b) =>
+        b.setButtonText("Add part").onClick(() => {
+          this.spec.parts!.push("");
+          redraw();
+        })
+      );
+    } else {
+      if (type === "sumif")
+        new Setting(c)
+          .setName("Property to total")
+          .addText((t) => {
+            t.setValue(this.spec.sumProp ?? "");
+            new ListSuggest(app, t.inputEl, props);
+            t.onChange((v) => (this.spec.sumProp = v.trim()));
+          });
+      if (type === "countif" || type === "sumif")
+        new Setting(c)
+          .setName("Count within")
+          .setDesc("Folder to scan — leave empty to use this grid's notes.")
+          .addText((t) => {
+            t.setValue(this.spec.countDir ?? "");
+            t.setPlaceholder("(this grid)");
+            new ListSuggest(app, t.inputEl, () => allFolderPaths(app));
+            t.onChange((v) => (this.spec.countDir = v.trim()));
+          });
+
+      this.spec.conditions = this.spec.conditions ?? [];
+      c.createEl("div", { cls: "setting-item-heading", text: "Conditions" });
+      c.createDiv({
+        cls: "gridsense-props-hint",
+        text:
+          type === "ifs"
+            ? "Checked top to bottom; the first match supplies the value."
+            : "All conditions must hold.",
+      });
+      const redraw = () => {
+        this.contentEl.empty();
+        this.onOpen();
+      };
+      this.spec.conditions.forEach((cond, i) => {
+        const setting = new Setting(c)
+          .setName(`When`)
+          .addText((t) => {
+            t.setPlaceholder("property");
+            t.setValue(cond.prop);
+            new ListSuggest(app, t.inputEl, props);
+            t.onChange((v) => (cond.prop = v.trim()));
+          })
+          .addDropdown((d) => {
+            for (const op of ["=", "!=", ">", "<", ">=", "<=", "contains", "empty", "not-empty"])
+              d.addOption(op, op);
+            d.setValue(cond.op).onChange((v) => (cond.op = v as Condition["op"]));
+          })
+          .addText((t) => {
+            t.setPlaceholder("value");
+            t.setValue(cond.value);
+            t.onChange((v) => (cond.value = v));
+          });
+        if (type === "ifs")
+          setting.addText((t) => {
+            t.setPlaceholder("→ result");
+            t.setValue(cond.then ?? "");
+            t.onChange((v) => (cond.then = v));
+          });
+        setting.addExtraButton((b) =>
+          b.setIcon("trash").onClick(() => {
+            this.spec.conditions!.splice(i, 1);
+            redraw();
+          })
+        );
+      });
+      new Setting(c).addButton((b) =>
+        b.setButtonText("Add condition").onClick(() => {
+          this.spec.conditions!.push({ prop: "", op: "=", value: "" });
+          redraw();
+        })
+      );
+
+      if (type === "if" || type === "and") {
+        new Setting(c).setName("Value when true").addText((t) => {
+          t.setValue(this.spec.thenValue ?? "");
+          t.setPlaceholder("true");
+          t.onChange((v) => (this.spec.thenValue = v));
+        });
+        new Setting(c).setName("Value when false").addText((t) => {
+          t.setValue(this.spec.elseValue ?? "");
+          t.setPlaceholder(type === "and" ? "false" : "(empty)");
+          t.onChange((v) => (this.spec.elseValue = v));
+        });
+      }
+      if (type === "ifs")
+        new Setting(c).setName("Value when nothing matches").addText((t) => {
+          t.setValue(this.spec.notFound ?? "");
+          t.onChange((v) => (this.spec.notFound = v));
+        });
+    }
+
+    new Setting(c).addButton((b) =>
+      b
+        .setButtonText(this.spec.name ? "Save" : "Add")
+        .setCta()
+        .onClick(async () => {
+          if (!this.spec.name) {
+            new Notice("GridSense: the formula column needs a name");
             return;
           }
           const cfg = this.plugin.folderConfig(this.folder);

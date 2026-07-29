@@ -55,16 +55,46 @@ export async function readHistory(app: App, folderPath: string): Promise<History
 
 const SHOW_BATCH = 100;
 
+export interface HistoryFilter {
+  /** Only entries touching this note path. */
+  path?: string;
+  /** Only entries touching this property key. */
+  key?: string;
+  label: string;
+}
+
+/** Narrow a log to the changes matching a filter (row / column / cell view). */
+export function filterHistory(entries: HistoryEntry[], f: HistoryFilter): HistoryEntry[] {
+  const out: HistoryEntry[] = [];
+  for (const e of entries) {
+    const changes = e.changes.filter(
+      (c) => (!f.path || c.path === f.path) && (!f.key || c.key === f.key)
+    );
+    if (changes.length) out.push({ ...e, changes });
+  }
+  return out;
+}
+
 export class HistoryLogModal extends Modal {
   private shown = SHOW_BATCH;
 
-  constructor(app: App, private folderPath: string, private entries: HistoryEntry[]) {
+  constructor(
+    app: App,
+    private folderPath: string,
+    private entries: HistoryEntry[],
+    private scopeLabel?: string,
+    private onRestore?: (change: { path: string; key: string; value: unknown }) => Promise<void>
+  ) {
     super(app);
   }
 
   onOpen() {
     this.modalEl.addClass("gridsense-history-modal");
-    this.titleEl.setText(`Edit history — ${this.folderPath || "(vault)"}`);
+    this.titleEl.setText(
+      this.scopeLabel
+        ? `History — ${this.scopeLabel}`
+        : `Edit history — ${this.folderPath || "(vault)"}`
+    );
     this.renderBody();
   }
 
@@ -98,6 +128,20 @@ export class HistoryLogModal extends Modal {
           cls: "gridsense-history-diff",
           text: `${valueToDisplay(ch.before) || "∅"} → ${valueToDisplay(ch.after) || "∅"}`,
         });
+        if (this.onRestore) {
+          // Restore the BEFORE value of this change — the point of looking at
+          // history is usually "put that back".
+          const btn = line.createEl("button", {
+            cls: "gridsense-history-restore",
+            text: "restore",
+          });
+          btn.setAttr("title", `Set ${ch.key} back to "${valueToDisplay(ch.before) || "(empty)"}"`);
+          btn.addEventListener("click", async () => {
+            await this.onRestore?.({ path: ch.path, key: ch.key, value: ch.before });
+            btn.setText("restored");
+            btn.addClass("gridsense-history-restored");
+          });
+        }
       }
     }
     if (this.entries.length > this.shown) {

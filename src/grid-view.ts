@@ -17,10 +17,11 @@ import type GridSensePlugin from "./main";
 import { GridStore } from "./store";
 import { EditEngine, normalizeWikiBrackets, parseInput, valueToDisplay } from "./edits";
 import { allHeadings } from "./headings";
-import { HistoryLogModal, appendHistory, readHistory } from "./history-log";
+import { HistoryLogModal, appendHistory, filterHistory, readHistory } from "./history-log";
 import { CellRef, ColumnSpec, FolderConfig, FormulaSpec, Row, colId } from "./types";
 import { evaluateFormulas } from "./formulas";
 import { ZoomValueModal } from "./zoom";
+import { parseClipboardTable } from "./import";
 import { iconForWidget, widgetForKey } from "./props-editor";
 import {
   ConfirmModal,
@@ -47,6 +48,8 @@ const ROW_BUFFER = 20;
 
 interface GridViewState {
   folder: string;
+  /** Set when the grid was opened from a .grid file. */
+  file?: string;
   [key: string]: unknown;
 }
 
@@ -69,9 +72,15 @@ export class GridView extends ItemView {
   private pendingEl: HTMLElement | null = null;
   private rowCountEl: HTMLElement | null = null;
   private warnEl: HTMLElement | null = null;
+  private hiddenEl: HTMLElement | null = null;
   /** Excel-style order stability: once displayed, row order is frozen until
    * the user changes sort/filter/scope — edits and new rows never reshuffle. */
+  private gridFile: string | null = null;
   private frozenPathOrder: string[] | null = null;
+  /** Left offsets (px) for frozen columns; empty when nothing is frozen. */
+  private frozenLeft: number[] = [];
+  private frozenRowCount = 0;
+  private headerH = 28;
   /** Notes created from draft rows keep their draft-side position. */
   private pinnedNew = new Map<string, "top" | "bottom">();
   /** UI-only draft rows (no file exists until committed). */
@@ -118,6 +127,7 @@ export class GridView extends ItemView {
     return GRID_VIEW_TYPE;
   }
   getDisplayText() {
+    if (this.gridFile) return this.gridFile.split("/").pop()?.replace(/\.grid$/, "") ?? "Grid";
     return this.folder ? `Grid: ${this.folder.split("/").pop()}` : "GridSense";
   }
   getIcon() {
@@ -125,10 +135,25 @@ export class GridView extends ItemView {
   }
 
   getState(): GridViewState {
-    return { folder: this.folder };
+    return this.gridFile ? { folder: this.folder, file: this.gridFile } : { folder: this.folder };
   }
 
   async setState(state: GridViewState, result: unknown): Promise<void> {
+    // A .grid file is a tiny pointer document: it names the folder to show
+    // (like a .base, it's a saved view rather than a copy of the data).
+    this.gridFile = typeof state?.file === "string" ? state.file : null;
+    if (this.gridFile) {
+      const f = this.app.vault.getAbstractFileByPath(this.gridFile);
+      if (f instanceof TFile) {
+        try {
+          const parsed = JSON.parse(await this.app.vault.read(f)) as { folder?: string };
+          state = { ...state, folder: parsed.folder ?? "" };
+        } catch {
+          new Notice(`GridSense: "${f.basename}.grid" isn't valid — showing the vault root`);
+          state = { ...state, folder: "" };
+        }
+      }
+    }
     this.folder = state?.folder ?? "";
     this.attachStore();
     this.buildChrome();
@@ -255,6 +280,9 @@ export class GridView extends ItemView {
     this.warnEl.setAttr("title", "Open columns & views to hide columns or set a row limit");
     this.warnEl.addEventListener("click", () => this.openColumnsModal());
     this.warnEl.hide();
+    this.hiddenEl = bar.createEl("button", { cls: "gridsense-hidden-warn" });
+    this.hiddenEl.addEventListener("click", () => this.openColumnsModal());
+    this.hiddenEl.hide();
     this.rowCountEl = bar.createSpan({ cls: "gridsense-rowcount" });
     this.statusEl = bar.createSpan({ cls: "gridsense-status" });
 
@@ -394,6 +422,26 @@ export class GridView extends ItemView {
         this.warnEl.hide();
       }
     }
+    // Loud, non-clashing notice that the grid isn't showing everything.
+    if (this.hiddenEl) {
+      const hiddenCols = cfg.hidden.filter((k) => (this.store?.propColumns ?? []).includes(k));
+      const hiddenRows = totalAll - visible;
+      const bits: string[] = [];
+      if (hiddenCols.length)
+        bits.push(`${hiddenCols.length} column${hiddenCols.length === 1 ? "" : "s"} hidden`);
+      if (hiddenRows > 0)
+        bits.push(`${hiddenRows.toLocaleString()} row${hiddenRows === 1 ? "" : "s"} not shown`);
+      if (bits.length) {
+        this.hiddenEl.setText(`⚠ ${bits.join(" · ")}`);
+        this.hiddenEl.setAttr(
+          "title",
+          `${hiddenCols.length ? "Hidden columns: " + hiddenCols.join(", ") + ". " : ""}Click to manage columns, views and limits.`
+        );
+        this.hiddenEl.show();
+      } else {
+        this.hiddenEl.hide();
+      }
+    }
     const parts = [`${this.cols.length - 1} columns`];
     if (needle) parts.push("filtered");
     this.updateStatus(parts.join(" · "));
@@ -436,13 +484,27 @@ export class GridView extends ItemView {
 
     const thead = table.createEl("thead");
     const hr = thead.createEl("tr");
-    hr.createEl("th", { cls: "gridsense-rownum", text: "#" });
+    hr.createEl("th", { cls: "gridsense-rownum gridsense-frozen-col", text: "#" });
+    // Frozen columns: sticky with a left offset that accumulates the widths of
+    // everything frozen before them (the row-number gutter counts as 44px).
+    const freezeCols = Math.max(0, this.cfg().freezeCols ?? 0);
+    const frozenLeft: number[] = [];
+    let acc = 44;
+    for (let i = 0; i < Math.min(freezeCols, this.cols.length); i++) {
+      frozenLeft.push(acc);
+      acc += this.colWidth(this.cols[i]);
+    }
+    this.frozenLeft = frozenLeft;
     const sort = this.cfg().sort;
     this.cols.forEach((c, ci) => {
       const shown = c.kind === "prop" ? this.cfg().rename?.[c.key] ?? c.key : c.key;
       const label =
         c.kind === "heading" ? `# ${shown}` : c.kind === "formula" ? `ƒ ${shown}` : shown;
       const th = hr.createEl("th", { cls: `gridsense-col-${c.kind}` });
+      if (ci < frozenLeft.length) {
+        th.addClass("gridsense-frozen-col");
+        th.style.left = `${frozenLeft[ci]}px`;
+      }
       if (c.kind !== "file") {
         th.draggable = true;
         th.addEventListener("dragstart", (e) => {
@@ -522,11 +584,35 @@ export class GridView extends ItemView {
       input.focus();
     });
 
+    // Frozen rows live in the header so virtualization can never unmount them.
+    const freezeRows = Math.max(0, this.cfg().freezeRows ?? 0);
+    this.frozenRowCount = Math.min(freezeRows, this.viewRows.length);
+    for (let ri = 0; ri < this.frozenRowCount; ri++) {
+      const tr = this.renderRow(thead, ri);
+      tr.addClass("gridsense-frozen-row");
+      // sticky offsets belong on the CELLS (a <tr> can't be a sticky box);
+      // stack each frozen row below the header and the ones above it.
+      const top = this.headerH + ri * this.rowH;
+      tr.querySelectorAll("td").forEach((td) => ((td as HTMLElement).style.top = `${top}px`));
+    }
+
     this.tbodyEl = table.createEl("tbody");
     this.winStart = -1;
     this.winEnd = -1;
     this.renderWindow(true);
     this.buildFooter(table);
+    // Re-stack frozen rows from their ACTUAL heights — estimated offsets left
+    // hairline gaps that let scrolled content show through.
+    const headerRowEl = thead.querySelector("tr") as HTMLElement | null;
+    if (headerRowEl && headerRowEl.offsetHeight > 8) {
+      this.headerH = headerRowEl.offsetHeight;
+      let top = this.headerH;
+      thead.querySelectorAll("tr.gridsense-frozen-row").forEach((tr) => {
+        const el = tr as HTMLElement;
+        tr.querySelectorAll("td").forEach((td) => ((td as HTMLElement).style.top = `${top}px`));
+        top += el.offsetHeight || this.rowH;
+      });
+    }
     scroller.scrollTop = prevScroll;
     if (this.draftFocusPending) {
       const which = this.draftFocusPending;
@@ -688,7 +774,7 @@ export class GridView extends ItemView {
     spTop.createEl("td", {
       attr: { colspan: String(this.cols.length + 1), style: `height: ${start * this.rowH}px` },
     });
-    for (let ri = start; ri < end; ri++) this.renderRow(tbody, ri);
+    for (let ri = Math.max(start, this.frozenRowCount); ri < end; ri++) this.renderRow(tbody, ri);
     const spBot = tbody.createEl("tr", { cls: "gridsense-spacer" });
     spBot.createEl("td", {
       attr: {
@@ -716,7 +802,7 @@ export class GridView extends ItemView {
     this.paintSelection();
   }
 
-  private renderRow(tbody: HTMLElement, ri: number) {
+  private renderRow(tbody: HTMLElement, ri: number): HTMLElement {
     const row = this.viewRows[ri];
     const tr = tbody.createEl("tr");
     const num = tr.createEl("td", { cls: "gridsense-rownum", text: String(ri + 1) });
@@ -732,6 +818,11 @@ export class GridView extends ItemView {
       menu.addItem((i) =>
         i.setTitle("Rename note…").setIcon("pencil").onClick(() =>
           new RenameFileModal(this.app, row.file).open()
+        )
+      );
+      menu.addItem((i) =>
+        i.setTitle("Row history…").setIcon("history").onClick(() =>
+          void this.openScopedHistory({ path: row.file.path, label: `row: ${row.file.basename}` })
         )
       );
       menu.addSeparator();
@@ -765,6 +856,10 @@ export class GridView extends ItemView {
     });
     this.cols.forEach((c, ci) => {
       const td = tr.createEl("td", { cls: `gridsense-cell gridsense-col-${c.kind}` });
+      if (ci < this.frozenLeft.length) {
+        td.addClass("gridsense-frozen-col");
+        td.style.left = `${this.frozenLeft[ci]}px`;
+      }
       td.dataset.row = String(ri);
       td.dataset.col = String(ci);
       this.paintCell(td, ri, ci);
@@ -773,6 +868,7 @@ export class GridView extends ItemView {
       td.addEventListener("dblclick", () => this.beginEdit(ri, ci));
       td.addEventListener("contextmenu", (e) => this.onCellContextMenu(e, ri, ci));
     });
+    return tr;
   }
 
   private cellValue(ri: number, ci: number): unknown {
@@ -933,11 +1029,21 @@ export class GridView extends ItemView {
         })
       );
       menu.addItem((i) =>
+        i.setTitle("Column history…").setIcon("history").onClick(() =>
+          void this.openScopedHistory({ key: c.key, label: `column: ${c.key}` })
+        )
+      );
+      menu.addItem((i) =>
         i.setTitle(`Delete column "${c.key}"…`).setIcon("trash").onClick(() =>
           this.confirmDeleteColumn(c.key)
         )
       );
     }
+    menu.addItem((i) =>
+      i.setTitle("Set column width…").setIcon("move-horizontal").onClick(() => {
+        new ColumnWidthModal(this, c).open();
+      })
+    );
     menu.addSeparator();
     menu.addItem((i) =>
       i.setTitle("Add column…").setIcon("plus").onClick(() => new NewColumnModal(this).open())
@@ -1323,28 +1429,9 @@ export class GridView extends ItemView {
     this.pasteText(text);
   }
 
-  /**
-   * Parse spreadsheet clipboard text (Excel / Google Sheets / Numbers /
-   * LibreOffice) into cells. Tricks adapted from the Excel-to-Markdown-Table
-   * plugin: normalize \r\n and Unicode NEL/LS/PS row separators, and unwrap
-   * double-quoted cells whose embedded newlines would otherwise shred rows
-   * (Excel escapes literal quotes inside them as "").
-   */
-  private parseClipboardGrid(text: string): string[][] {
-    const SENTINEL = "\u0000";
-    let t = text.replace(/\r\n?/g, "\n").replace(/[\u0085\u2028\u2029]/g, "\n");
-    t = t.replace(/"([^\t"]*(?:""[^\t"]*)*\n[^\t"]*(?:""[^\t"]*)*)"/g, (_m, cell: string) =>
-      cell.replace(/\n/g, SENTINEL).replace(/""/g, '"')
-    );
-    return t
-      .replace(/\n$/, "")
-      .split("\n")
-      .map((l) => l.split("\t").map((c) => c.split(SENTINEL).join("\n")));
-  }
-
   private pasteText(text: string) {
     if (!this.head) return;
-    const grid = this.parseClipboardGrid(text);
+    const grid = parseClipboardTable(text);
     const start = this.selRange() ?? { r1: this.head.row, c1: this.head.col, r2: 0, c2: 0 };
     const writes: { file: TFile; key: string; value: unknown }[] = [];
     grid.forEach((line, dr) => {
@@ -1522,6 +1609,20 @@ export class GridView extends ItemView {
     }
   }
 
+  /** Current effective width of a column, and a setter that persists it. */
+  currentWidth(c: ColumnSpec): number {
+    return this.cfg().widths?.[colId(c)] ?? this.colWidth(c);
+  }
+
+  async setColumnWidth(c: ColumnSpec, px: number | null) {
+    const cfg = this.cfg();
+    cfg.widths = cfg.widths ?? {};
+    if (px === null) delete cfg.widths[colId(c)];
+    else cfg.widths[colId(c)] = Math.max(MIN_COL_PX, px);
+    await this.plugin.saveSettings();
+    await this.render();
+  }
+
   /** Property-name suggestions: this grid's columns, then the whole vault's
    * known properties (from Obsidian's type manager, defensively probed). */
   propertyNameSuggestions(): string[] {
@@ -1630,6 +1731,61 @@ export class GridView extends ItemView {
 
   refresh(): Promise<void> {
     return this.render();
+  }
+
+  // --------------------------------------------------------------- commands
+  // Thin wrappers so grid actions can be bound to user hotkeys.
+
+  commandFill(dir: "down" | "right") {
+    void this.fill(dir);
+  }
+  commandFindReplace() {
+    this.openFindReplace();
+  }
+  commandUndo() {
+    void this.undo();
+  }
+  commandRedo() {
+    void this.engine.redo();
+  }
+  commandToggleWrap() {
+    const cfg = this.cfg();
+    cfg.wrap = !cfg.wrap;
+    this.saveDebounced();
+    void this.render();
+    new Notice(`GridSense: word wrap ${cfg.wrap ? "on" : "off"}`);
+  }
+  commandAddColumn() {
+    new NewColumnModal(this).open();
+  }
+  commandColumns() {
+    this.openColumnsModal();
+  }
+  /** History scoped to one note / property / cell, with restore buttons. */
+  async openScopedHistory(scope: { path?: string; key?: string; label: string }) {
+    const all = await readHistory(this.app, this.folder);
+    const entries = filterHistory(all, scope);
+    new HistoryLogModal(this.app, this.folder, entries, scope.label, async (change) => {
+      const file = this.app.vault.getAbstractFileByPath(change.path);
+      if (!(file instanceof TFile)) {
+        new Notice("GridSense: that note no longer exists");
+        return;
+      }
+      const write = { file, key: change.key, value: change.value };
+      this.applyLocal([write]);
+      await this.engine.apply(`restore ${change.key}`, [write]);
+      new Notice(`GridSense: restored ${change.key} on "${file.basename}" (⌘Z to undo)`);
+    }).open();
+  }
+
+  async commandHistory() {
+    const entries = await readHistory(this.app, this.folder);
+    new HistoryLogModal(this.app, this.folder, entries).open();
+  }
+  commandRecompile() {
+    this.resetRowOrder();
+    this.attachStore();
+    void this.render();
   }
 
   addHeadingColumn() {
@@ -1980,6 +2136,33 @@ class ColumnsModal extends Modal {
         });
       });
 
+    new Setting(c)
+      .setName("Freeze columns")
+      .setDesc("Keep the first N columns pinned while scrolling sideways. 0 or empty = none.")
+      .addText((t) => {
+        t.setPlaceholder("0");
+        t.setValue(cfg.freezeCols ? String(cfg.freezeCols) : "");
+        t.onChange(async (v) => {
+          const n = parseInt(v.trim());
+          cfg.freezeCols = Number.isNaN(n) || n <= 0 ? undefined : n;
+          await this.view.plugin.saveSettings();
+          await this.view.refresh();
+        });
+      });
+    new Setting(c)
+      .setName("Freeze rows")
+      .setDesc("Keep the first N rows pinned below the header. 0 or empty = none.")
+      .addText((t) => {
+        t.setPlaceholder("0");
+        t.setValue(cfg.freezeRows ? String(cfg.freezeRows) : "");
+        t.onChange(async (v) => {
+          const n = parseInt(v.trim());
+          cfg.freezeRows = Number.isNaN(n) || n <= 0 ? undefined : n;
+          await this.view.plugin.saveSettings();
+          await this.view.refresh();
+        });
+      });
+
     c.createEl("div", { cls: "setting-item-heading", text: "Rows" });
     new Setting(c)
       .setName("Row limit")
@@ -2038,6 +2221,48 @@ class NewColumnModal extends Modal {
           void this.view.addColumn(value);
         })
     );
+  }
+}
+
+class ColumnWidthModal extends Modal {
+  constructor(private view: GridView, private col: ColumnSpec) {
+    super(view.app);
+  }
+
+  onOpen() {
+    this.titleEl.setText(`Width — ${this.col.key}`);
+    let value = String(Math.round(this.view.currentWidth(this.col)));
+    new Setting(this.contentEl)
+      .setName("Width in pixels")
+      .setDesc("Overrides the auto-sized width for this column. Clear the field to go back to automatic.")
+      .addText((t) => {
+        t.setValue(value);
+        t.onChange((v) => (value = v));
+        window.setTimeout(() => {
+          t.inputEl.focus();
+          t.inputEl.select();
+        }, 0);
+        t.inputEl.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            this.commit(value);
+          }
+        });
+      });
+    new Setting(this.contentEl)
+      .addButton((b) =>
+        b.setButtonText("Automatic").onClick(() => {
+          this.close();
+          void this.view.setColumnWidth(this.col, null);
+        })
+      )
+      .addButton((b) => b.setButtonText("Set").setCta().onClick(() => this.commit(value)));
+  }
+
+  private commit(value: string) {
+    const n = parseInt(value.trim());
+    this.close();
+    void this.view.setColumnWidth(this.col, Number.isNaN(n) ? null : n);
   }
 }
 
