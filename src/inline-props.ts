@@ -1,4 +1,4 @@
-import { App, MarkdownView, TFile, debounce } from "obsidian";
+import { App, MarkdownView, Notice, TFile, debounce } from "obsidian";
 import type GridSensePlugin from "./main";
 import { EditEngine } from "./edits";
 import { PropsEditor } from "./props-editor";
@@ -25,8 +25,9 @@ export class InlinePropsManager {
 
   constructor(private app: App, private plugin: GridSensePlugin) {}
 
-  enable() {
-    document.body.addClass(BODY_CLASS);
+  /** Wire workspace events once; both modes (takeover on/off) need them. */
+  start() {
+    if (this.detachFns.length) return;
     const ws = this.app.workspace;
     const r1 = ws.on("layout-change", () => this.refresh());
     const r2 = ws.on("active-leaf-change", () => this.refresh());
@@ -38,15 +39,40 @@ export class InlinePropsManager {
       () => ws.offref(r3),
       () => this.app.metadataCache.offref(r4),
     ];
+    this.apply();
+  }
+
+  /** Reflect the current setting: takeover strip, or just the toggle button. */
+  apply() {
+    document.body.toggleClass(BODY_CLASS, this.plugin.settings.inlineProps);
+    if (!this.plugin.settings.inlineProps) {
+      for (const [, m] of this.mounts) m.strip.remove();
+      this.mounts.clear();
+    }
     this.mountAll();
   }
 
+  enable() {
+    this.start();
+    this.apply();
+  }
+
   disable() {
+    document.body.removeClass(BODY_CLASS);
+    for (const [, m] of this.mounts) m.strip.remove();
+    this.mounts.clear();
+    this.mountAll(); // leaves the "GridSense properties" switch-back button
+  }
+
+  stop() {
     document.body.removeClass(BODY_CLASS);
     this.detachFns.forEach((fn) => fn());
     this.detachFns = [];
     for (const [, m] of this.mounts) m.strip.remove();
     this.mounts.clear();
+    document
+      .querySelectorAll(".gridsense-enable-toggle")
+      .forEach((el) => el.remove());
   }
 
   private onMetaChanged(file: TFile) {
@@ -60,7 +86,8 @@ export class InlinePropsManager {
       const view = leaf.view;
       if (!(view instanceof MarkdownView) || !view.file) continue;
       seen.add(view);
-      this.ensureMount(view, view.file);
+      if (this.plugin.settings.inlineProps) this.ensureMount(view, view.file);
+      else this.ensureOffToggle(view);
     }
     // Drop mounts whose views are gone.
     for (const [view, m] of [...this.mounts]) {
@@ -69,6 +96,27 @@ export class InlinePropsManager {
         this.mounts.delete(view);
       }
     }
+  }
+
+  /** Takeover disabled: offer a one-click switch above Obsidian's panel. */
+  private ensureOffToggle(view: MarkdownView) {
+    const host = view.containerEl.querySelector(".metadata-container") as HTMLElement | null;
+    if (!host) return;
+    if (host.querySelector(".gridsense-enable-toggle")) return;
+    const btn = host.createEl("button", {
+      cls: "gridsense-strip-toggle gridsense-enable-toggle",
+      text: "GridSense properties",
+    });
+    btn.setAttr("title", "Use GridSense's property editor for notes (beta)");
+    host.prepend(btn);
+    btn.addEventListener("click", async () => {
+      this.plugin.settings.inlineProps = true;
+      await this.plugin.saveSettings();
+      document
+        .querySelectorAll(".gridsense-enable-toggle")
+        .forEach((el) => el.remove());
+      this.apply();
+    });
   }
 
   private ensureMount(view: MarkdownView, file: TFile) {
@@ -93,6 +141,19 @@ export class InlinePropsManager {
     }
     existing?.strip.remove();
     const strip = host.createDiv({ cls: STRIP_CLASS });
+    // Escape hatch: flip this note's panel back to Obsidian's own properties
+    // UI without a trip to settings (and back again).
+    const toggle = strip.createEl("button", {
+      cls: "gridsense-strip-toggle",
+      text: "Obsidian properties",
+    });
+    toggle.setAttr("title", "Switch back to Obsidian's properties panel (GridSense setting)");
+    toggle.addEventListener("click", async () => {
+      this.plugin.settings.inlineProps = false;
+      await this.plugin.saveSettings();
+      this.disable();
+      new Notice("GridSense: switched to Obsidian's properties panel");
+    });
     const engine = new EditEngine(this.app, (entry) =>
       void appendHistory(
         this.app,

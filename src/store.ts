@@ -16,6 +16,43 @@ export class GridStore {
   private compiling = false;
   private detachFns: (() => void)[] = [];
 
+  /**
+   * Optimistic overlay: values we just wrote, applied on top of whatever the
+   * metadata cache currently says. Obsidian indexes files one at a time, so a
+   * compile that lands mid-batch would otherwise repaint stale/blank cells and
+   * then restore them — the flicker users see during a big fill. Entries are
+   * dropped as soon as the cache agrees (or after OVERLAY_TTL as a backstop).
+   */
+  private overlay = new Map<string, Map<string, { value: unknown; at: number }>>();
+
+  private static readonly OVERLAY_TTL = 15000;
+
+  setOverlay(writes: { path: string; key: string; value: unknown }[], now: number) {
+    for (const w of writes) {
+      let byKey = this.overlay.get(w.path);
+      if (!byKey) this.overlay.set(w.path, (byKey = new Map()));
+      byKey.set(w.key, { value: w.value, at: now });
+    }
+  }
+
+  private applyOverlay(row: Row, now: number) {
+    const byKey = this.overlay.get(row.file.path);
+    if (!byKey) return;
+    for (const [key, entry] of [...byKey]) {
+      const actual = row.fm[key];
+      const settled =
+        JSON.stringify(actual ?? null) === JSON.stringify(entry.value ?? null) ||
+        (entry.value === undefined && !(key in row.fm));
+      if (settled || now - entry.at > GridStore.OVERLAY_TTL) {
+        byKey.delete(key);
+        continue;
+      }
+      if (entry.value === undefined) delete row.fm[key];
+      else row.fm[key] = entry.value;
+    }
+    if (!byKey.size) this.overlay.delete(row.file.path);
+  }
+
   get isDirty(): boolean {
     return this.dirty;
   }
@@ -102,6 +139,7 @@ export class GridStore {
       }
       if (!rows.length) return false;
       this.rows = rows;
+      // Seeds the stable column order from the last session's snapshot.
       this.propColumns = payload.columns ?? [];
       return true;
     } catch {
@@ -122,22 +160,27 @@ export class GridStore {
 
   private async compileInner(): Promise<void> {
     const files = this.files();
+    const now = Date.now();
     const counts = new Map<string, number>();
     const rows: Row[] = [];
     for (const file of files) {
       const fm = { ...(this.app.metadataCache.getFileCache(file)?.frontmatter ?? {}) };
-      for (const k of Object.keys(fm)) {
-        if (UNSAFE.has(k)) {
-          delete (fm as Record<string, unknown>)[k];
-          continue;
-        }
-        counts.set(k, (counts.get(k) ?? 0) + 1);
-      }
-      rows.push({ file, fm, headings: {} });
+      for (const k of Object.keys(fm)) if (UNSAFE.has(k)) delete (fm as Record<string, unknown>)[k];
+      const row: Row = { file, fm, headings: {} };
+      // Overlay first, then count — a column added optimistically must exist.
+      this.applyOverlay(row, now);
+      for (const k of Object.keys(row.fm)) counts.set(k, (counts.get(k) ?? 0) + 1);
+      rows.push(row);
     }
-    this.propColumns = [...counts.keys()].sort(
-      (a, b) => (counts.get(b) ?? 0) - (counts.get(a) ?? 0) || a.localeCompare(b)
-    );
+    // Column order must be STABLE: keys we already know keep their position,
+    // newly-seen keys are appended (most-used first among themselves).
+    // Sorting everything by usage each compile made columns jump around
+    // whenever values were filled in.
+    const known = this.propColumns.filter((k) => counts.has(k));
+    const fresh = [...counts.keys()]
+      .filter((k) => !this.propColumns.includes(k))
+      .sort((a, b) => (counts.get(b) ?? 0) - (counts.get(a) ?? 0) || a.localeCompare(b));
+    this.propColumns = [...known, ...fresh];
     // Resolve heading columns (async, body reads are cached by Obsidian).
     const hcols = this.headingColumns();
     if (hcols.length) {

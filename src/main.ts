@@ -13,9 +13,9 @@ export default class GridSensePlugin extends Plugin {
 
     this.addSettingTab(new GridSenseSettingTab(this));
     this.inlineProps = new InlinePropsManager(this.app, this);
-    this.app.workspace.onLayoutReady(() => {
-      if (this.settings.inlineProps) this.inlineProps?.enable();
-    });
+    // Always start: the manager either takes over the panel or just offers the
+    // "GridSense properties" switch button above Obsidian's own.
+    this.app.workspace.onLayoutReady(() => this.inlineProps?.start());
     this.registerView(GRID_VIEW_TYPE, (leaf) => new GridView(leaf, this));
 
     this.addCommand({
@@ -76,7 +76,7 @@ export default class GridSensePlugin extends Plugin {
   }
 
   onunload() {
-    this.inlineProps?.disable();
+    this.inlineProps?.stop();
   }
 }
 
@@ -96,8 +96,7 @@ class GridSenseSettingTab extends PluginSettingTab {
         t.setValue(this.plugin.settings.inlineProps).onChange(async (v) => {
           this.plugin.settings.inlineProps = v;
           await this.plugin.saveSettings();
-          if (v) this.plugin.inlineProps?.enable();
-          else this.plugin.inlineProps?.disable();
+          this.plugin.inlineProps?.apply();
         })
       );
     new Setting(this.containerEl)

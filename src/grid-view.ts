@@ -11,6 +11,7 @@ import {
   TFolder,
   WorkspaceLeaf,
   debounce,
+  setIcon,
 } from "obsidian";
 import type GridSensePlugin from "./main";
 import { GridStore } from "./store";
@@ -20,6 +21,7 @@ import { HistoryLogModal, appendHistory, readHistory } from "./history-log";
 import { CellRef, ColumnSpec, FolderConfig, FormulaSpec, Row, colId } from "./types";
 import { evaluateFormulas } from "./formulas";
 import { ZoomValueModal } from "./zoom";
+import { iconForWidget, widgetForKey } from "./props-editor";
 import {
   ConfirmModal,
   FormulaBuilderModal,
@@ -415,7 +417,8 @@ export class GridView extends ItemView {
               : valueToDisplay(r.fm[c.key]);
       if (v && v.length > maxLen) maxLen = Math.min(v.length, 80);
     }
-    return Math.max(MIN_COL_PX, Math.min(MAX_COL_PX, Math.round(maxLen * 7.2 + 24)));
+    const cap = this.cfg().widthCap ?? MAX_COL_PX;
+    return Math.max(MIN_COL_PX, Math.min(cap, Math.round(maxLen * 7.2 + 24)));
   }
 
   private buildTable() {
@@ -693,6 +696,10 @@ export class GridView extends ItemView {
         style: `height: ${Math.max(0, total - end) * this.rowH}px`,
       },
     });
+    // Breathing room so the sticky footer (draft row + Σ) can never cover the
+    // last data row when you scroll to the bottom.
+    const tail = tbody.createEl("tr", { cls: "gridsense-spacer gridsense-tailpad" });
+    tail.createEl("td", { attr: { colspan: String(this.cols.length + 1) } });
     // Refine the row-height estimate from what's actually on screen.
     const rendered = end - start;
     if (rendered > 0) {
@@ -726,6 +733,28 @@ export class GridView extends ItemView {
         i.setTitle("Rename note…").setIcon("pencil").onClick(() =>
           new RenameFileModal(this.app, row.file).open()
         )
+      );
+      menu.addSeparator();
+      menu.addItem((i) =>
+        i
+          .setTitle("Delete note…")
+          .setIcon("trash")
+          .onClick(() =>
+            new ConfirmModal(
+              this.app,
+              `Delete "${row.file.basename}"?`,
+              "The note is moved to trash (your Obsidian 'Deleted files' setting decides which trash). This is NOT covered by GridSense's undo.",
+              "Move to trash",
+              async () => {
+                try {
+                  await this.app.fileManager.trashFile(row.file);
+                  new Notice(`GridSense: moved "${row.file.basename}" to trash`);
+                } catch (err) {
+                  new Notice(`GridSense: delete failed: ${String(err)}`);
+                }
+              }
+            ).open()
+          )
       );
       menu.showAtMouseEvent(e);
     });
@@ -809,9 +838,42 @@ export class GridView extends ItemView {
       td.createDiv({ cls: "gridsense-heading-preview", text });
       return;
     }
+    if (/\[\[[^\]]+\]\]/.test(text)) {
+      this.paintWikilinks(td, text, row.file.path);
+      return;
+    }
     td.setText(text);
     if (typeof v === "boolean") td.addClass("gridsense-bool");
     if (typeof v === "number") td.addClass("gridsense-num");
+  }
+
+  /**
+   * Render `[[Note]]` / `[[Note|alias]]` / `[[Note#Heading]]` inside a cell as
+   * real clickable links (alias shown when present), leaving other text alone.
+   */
+  private paintWikilinks(td: HTMLElement, text: string, sourcePath: string) {
+    const rx = /\[\[([^\]|#]+)(#[^\]|]+)?(?:\|([^\]]+))?\]\]/g;
+    let last = 0;
+    let m: RegExpExecArray | null;
+    while ((m = rx.exec(text)) !== null) {
+      if (m.index > last) td.appendText(text.slice(last, m.index));
+      const [, target, heading, alias] = m;
+      const linkPath = `${target}${heading ?? ""}`;
+      const a = td.createEl("a", {
+        cls: "internal-link gridsense-wikilink",
+        text: alias ?? target,
+      });
+      a.setAttr("title", linkPath);
+      const resolved = this.app.metadataCache.getFirstLinkpathDest(target.trim(), sourcePath);
+      if (!resolved) a.addClass("is-unresolved");
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        void this.app.workspace.openLinkText(linkPath, sourcePath, e.metaKey || e.ctrlKey);
+      });
+      last = m.index + m[0].length;
+    }
+    if (last < text.length) td.appendText(text.slice(last));
   }
 
   // ------------------------------------------------------------ column sizing
@@ -932,8 +994,15 @@ export class GridView extends ItemView {
   private dragging = false;
 
   private onCellMouseDown(e: MouseEvent, ri: number, ci: number) {
+    const target = e.target as HTMLElement;
+    // Clicking inside the open cell editor (e.g. to place the caret or drop a
+    // text selection) must not commit and close it.
+    if (target.closest(".gridsense-editor")) return;
+    // Right/middle mousedown must not collapse the selection — the context
+    // menu needs the range that was there when you right-clicked.
+    if (e.button !== 0) return;
     if (this.editing) this.commitEdit();
-    if ((e.target as HTMLElement).closest("a")) return;
+    if (target.closest("a")) return;
     e.preventDefault();
     this.contentEl.focus();
     if (e.shiftKey && this.anchor) this.setSel(this.anchor, { row: ri, col: ci });
@@ -1057,6 +1126,19 @@ export class GridView extends ItemView {
     td.empty();
     const input = td.createEl("input", { cls: "gridsense-editor", type: "text" });
     input.value = seed !== undefined ? seed : current;
+    // Wikilink autocomplete: suggests note names once you type "[[".
+    new ListSuggest(this.app, input, () => {
+      const m = /\[\[([^\]]*)$/.exec(input.value);
+      if (!m) return [];
+      const typed = m[1].toLowerCase();
+      return this.app.vault
+        .getMarkdownFiles()
+        .map((f) => f.basename)
+        .filter((n) => !typed || n.toLowerCase().includes(typed))
+        .sort()
+        .slice(0, 50)
+        .map((n) => input.value.replace(/\[\[[^\]]*$/, `[[${n}]]`));
+    });
     input.focus();
     if (seed === undefined) input.select();
     const finish = (commit: boolean, thenMove?: { dr: number; dc: number }) => {
@@ -1113,6 +1195,12 @@ export class GridView extends ItemView {
         else row.fm[w.key] = w.value;
       }
     }
+    // Hand the same values to the store as an optimistic overlay so a compile
+    // landing mid-write can't repaint stale cells (the fill-down flicker).
+    this.store!.setOverlay(
+      writes.map((w) => ({ path: w.file.path, key: w.key, value: w.value })),
+      Date.now()
+    );
     this.requestRender();
   }
 
@@ -1790,11 +1878,17 @@ class ColumnsModal extends Modal {
       })
     );
     for (const key of this.view.allPropertyKeys()) {
-      new Setting(c).setName(key).addToggle((t) =>
+      const widget = widgetForKey(this.view.app, key);
+      const setting = new Setting(c).setName(key).addToggle((t) =>
         t.setValue(!cfg.hidden.includes(key)).onChange(async (v) => {
           await this.view.setColumnHidden(key, !v);
         })
       );
+      // Property-type icon, matching Obsidian's own properties UI.
+      const icon = createSpan({ cls: "gridsense-colicon" });
+      setIcon(icon, iconForWidget(widget));
+      icon.setAttr("title", widget ? `Type: ${widget}` : "Type: text (unset)");
+      setting.nameEl.prepend(icon);
     }
 
     c.createEl("div", { cls: "setting-item-heading", text: "Heading columns" });
@@ -1849,6 +1943,27 @@ class ColumnsModal extends Modal {
         ).open();
       })
     );
+
+    new Setting(c)
+      .setName("Column width cap")
+      .setDesc(
+        `Widest an auto-sized column gets in this grid (px). Columns you drag-resize keep their own width. Default ${MAX_COL_PX}.`
+      )
+      .addText((t) => {
+        t.setPlaceholder(String(MAX_COL_PX));
+        t.setValue(cfg.widthCap !== undefined ? String(cfg.widthCap) : "");
+        t.onChange(async (v) => {
+          const trimmed = v.trim();
+          if (trimmed === "") delete cfg.widthCap;
+          else {
+            const n = parseInt(trimmed);
+            if (Number.isNaN(n) || n < MIN_COL_PX) return;
+            cfg.widthCap = n;
+          }
+          await this.view.plugin.saveSettings();
+          await this.view.refresh();
+        });
+      });
 
     c.createEl("div", { cls: "setting-item-heading", text: "Rows" });
     new Setting(c)

@@ -72,6 +72,8 @@ export interface FolderConfig {
   /** Per-column widths in px (keyed by colId). */
   widths?: Record<string, number>;
   wrap?: boolean;
+  /** Max auto-computed column width in px for this grid (drag-resize wins). */
+  widthCap?: number;
   limit?: number;
   formulas?: FormulaSpec[];
   /** Display order of columns (colIds); unlisted columns keep natural order. */

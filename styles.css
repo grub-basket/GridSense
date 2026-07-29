@@ -547,3 +547,40 @@ body.gridsense-inline-props .metadata-container .metadata-add-button {
 .gridsense-addcol input {
   min-width: 140px;
 }
+
+/* ------------------------ v0.8 polish: links, toggles -------------------- */
+
+.gridsense-wikilink {
+  cursor: pointer;
+}
+
+.gridsense-tailpad td {
+  height: 3.2em;
+  border: none;
+}
+
+.gridsense-colicon {
+  display: inline-flex;
+  vertical-align: middle;
+  margin-right: 6px;
+  color: var(--text-muted);
+}
+.gridsense-colicon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.gridsense-strip-toggle {
+  font-size: var(--font-ui-smaller);
+  padding: 2px 8px;
+  margin-bottom: 6px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.gridsense-strip-toggle:hover {
+  color: var(--text-accent);
+  border-color: var(--text-accent);
+}

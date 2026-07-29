@@ -29,7 +29,7 @@ const TYPE_CHOICES: { widget: string; label: string; icon: string }[] = [
   { widget: "datetime", label: "Date & time", icon: "clock" },
 ];
 
-function iconForWidget(widget: string | null): string {
+export function iconForWidget(widget: string | null): string {
   switch (widget) {
     case "aliases":
       return "forward";
@@ -51,6 +51,22 @@ function iconForWidget(widget: string | null): string {
 }
 
 const LIST_WIDGETS = new Set(["multitext", "tags", "aliases"]);
+
+/** Effective widget for a property: reserved names beat vault-assigned type. */
+export function widgetForKey(app: App, key: string): string | null {
+  const reserved = RESERVED[key.toLowerCase()];
+  if (reserved) return reserved;
+  try {
+    const mtm = (
+      app as unknown as {
+        metadataTypeManager?: { getPropertyInfo?: (k: string) => { widget?: string } | null };
+      }
+    ).metadataTypeManager;
+    return mtm?.getPropertyInfo?.(key.toLowerCase())?.widget ?? null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Reusable keyboard-friendly property editor for one note. Renders into any
@@ -109,20 +125,8 @@ export class PropsEditor {
 
   // ------------------------------------------------------------------- types
 
-  /** Effective widget for a key: reserved beats vault-assigned type. */
   private widgetFor(key: string): string | null {
-    const reserved = RESERVED[key.toLowerCase()];
-    if (reserved) return reserved;
-    try {
-      const mtm = (
-        this.app as unknown as {
-          metadataTypeManager?: { getPropertyInfo?: (k: string) => { widget?: string } | null };
-        }
-      ).metadataTypeManager;
-      return mtm?.getPropertyInfo?.(key.toLowerCase())?.widget ?? null;
-    } catch {
-      return null;
-    }
+    return widgetForKey(this.app, key);
   }
 
   private isReserved(key: string): boolean {
