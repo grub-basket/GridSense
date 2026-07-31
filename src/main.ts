@@ -6,6 +6,7 @@ import { DEFAULT_SETTINGS, FolderConfig, GridSenseSettings } from "./types";
 import { ConfigFileStore } from "./config-file";
 import { GridTrash } from "./trash";
 import { PasteImportModal } from "./import";
+import { DiagnoseModal } from "./diagnose";
 import { ConfirmModal } from "./formula-builder";
 
 export default class GridSensePlugin extends Plugin {
@@ -84,6 +85,24 @@ export default class GridSensePlugin extends Plugin {
         if (!view) return false;
         if (!checking) void this.saveGridFile(view.scopeFolder());
         return true;
+      },
+    });
+
+    this.addCommand({
+      id: "scan-blank-duplicates",
+      name: "Scan folder for blank or duplicate notes…",
+      callback: () => {
+        const view = this.app.workspace.getActiveViewOfType(GridView);
+        const grid = this.app.workspace
+          .getLeavesOfType(GRID_VIEW_TYPE)
+          .map((l) => l.view)
+          .find((v): v is GridView => v instanceof GridView);
+        const active = this.app.workspace.getActiveFile();
+        const folder =
+          view?.scopeFolder() ??
+          grid?.scopeFolder() ??
+          (active?.parent?.path === "/" ? "" : active?.parent?.path ?? "");
+        new DiagnoseModal(this.app, folder).open();
       },
     });
 

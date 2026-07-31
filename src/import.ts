@@ -216,6 +216,7 @@ export class PasteImportModal extends Modal {
       await this.app.vault.createFolder(dir).catch(() => undefined);
     let made = 0;
     let skipped = 0;
+    const renamed: string[] = [];
     for (const row of body) {
       const name = this.safeName(row[this.nameCol] ?? "");
       if (!name) {
@@ -224,8 +225,12 @@ export class PasteImportModal extends Modal {
       }
       let path = normalizePath(`${dir ? dir + "/" : ""}${name}.md`);
       let n = 2;
+      const wanted = path;
       while (this.app.vault.getAbstractFileByPath(path))
         path = normalizePath(`${dir ? dir + "/" : ""}${name} (${n++}).md`);
+      // Never silently shadow an existing note with a near-identical name —
+      // that reads as "a blank duplicate appeared".
+      if (path !== wanted) renamed.push(path.split("/").pop() ?? path);
       try {
         const file = (await this.app.vault.create(path, "---\n---\n")) as TFile;
         await this.app.fileManager.processFrontMatter(file, (fm) => {
@@ -244,7 +249,11 @@ export class PasteImportModal extends Modal {
     this.close();
     new Notice(
       `GridSense: created ${made} note${made === 1 ? "" : "s"}${skipped ? `, skipped ${skipped}` : ""}.` +
-        (this.backupPath ? " A CSV of the paste was saved in the plugin folder." : "")
+        (renamed.length
+          ? ` ${renamed.length} had a name that already existed and became: ${renamed.slice(0, 3).join(", ")}${renamed.length > 3 ? "…" : ""}.`
+          : "") +
+        (this.backupPath ? " A CSV of the paste was saved in the plugin folder." : ""),
+      renamed.length ? 12000 : undefined
     );
   }
 }
