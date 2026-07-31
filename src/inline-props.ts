@@ -102,6 +102,7 @@ export class InlinePropsManager {
       host?.toggleClass(BODY_CLASS, on);
       if (on) {
         view.containerEl.querySelectorAll(".gridsense-enable-toggle").forEach((el) => el.remove());
+        host?.removeClass("gridsense-has-toggle");
         this.ensureMount(view, view.file);
       } else {
         const m = this.mounts.get(view);
@@ -130,8 +131,13 @@ export class InlinePropsManager {
       cls: "gridsense-strip-toggle gridsense-enable-toggle",
       text: "GridSense properties",
     });
-    btn.setAttr("title", "Use GridSense's property editor for notes (beta)");
-    host.prepend(btn);
+    btn.setAttr("title", "Switch this note to GridSense's property editor (beta)");
+    host.addClass("gridsense-has-toggle");
+    // Sit in Obsidian's own heading row (whose title we hide) rather than
+    // stacking a second line above it.
+    const heading = host.querySelector(".metadata-properties-heading");
+    if (heading) heading.prepend(btn);
+    else host.prepend(btn);
     const path = view.file?.path;
     btn.addEventListener("click", async () => {
       if (path) await this.setOverride(path, true);

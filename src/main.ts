@@ -72,6 +72,7 @@ export default class GridSensePlugin extends Plugin {
     gridCmd("grid-toggle-wrap", "Grid: toggle word wrap", (v) => v.commandToggleWrap());
     gridCmd("grid-add-column", "Grid: add column…", (v) => v.commandAddColumn());
     gridCmd("grid-columns", "Grid: columns & views…", (v) => v.commandColumns());
+    gridCmd("grid-filters", "Grid: filters…", (v) => v.commandFilters());
     gridCmd("grid-history", "Grid: edit history…", (v) => void v.commandHistory());
     gridCmd("grid-recompile", "Grid: recompile from notes", (v) => v.commandRecompile());
 

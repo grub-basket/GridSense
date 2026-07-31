@@ -18,11 +18,12 @@ import { GridStore } from "./store";
 import { EditEngine, normalizeWikiBrackets, parseInput, valueToDisplay } from "./edits";
 import { allHeadings } from "./headings";
 import { HistoryLogModal, appendHistory, filterHistory, readHistory } from "./history-log";
-import { CellRef, ColumnSpec, FolderConfig, FormulaSpec, Row, colId } from "./types";
-import { evaluateFormulas } from "./formulas";
+import { CellRef, ColumnSpec, Condition, FolderConfig, FormulaSpec, Row, colId } from "./types";
+import { evaluateFormulas, matches } from "./formulas";
 import { ZoomValueModal } from "./zoom";
 import { parseClipboardTable } from "./import";
 import { iconForWidget, widgetForKey } from "./props-editor";
+import { TOOLBOX_TOOLS, addToolboxMenu, toolboxInstalled } from "./toolbox";
 import {
   ConfirmModal,
   FormulaBuilderModal,
@@ -80,6 +81,15 @@ export class GridView extends ItemView {
   /** Left offsets (px) for frozen columns; empty when nothing is frozen. */
   private frozenLeft: number[] = [];
   private frozenRowCount = 0;
+  /**
+   * Rows that were visible when the current filter was applied. Editing a cell
+   * (e.g. renaming a note) must not yank its row out from under you mid-edit —
+   * membership only re-decides when the filter/scope changes or you refresh.
+   */
+  private stickyRows: Set<string> | null = null;
+  /** While a batch write runs the grid is read-only and renders are deferred. */
+  private busy = false;
+  private busyEl: HTMLElement | null = null;
   private headerH = 28;
   /** Notes created from draft rows keep their draft-side position. */
   private pinnedNew = new Map<string, "top" | "bottom">();
@@ -189,6 +199,41 @@ export class GridView extends ItemView {
     );
   }
 
+  /**
+   * Run a batch write with the grid locked: no editing, no re-render churn,
+   * and the scroll position preserved. Renders are deferred to the end so the
+   * user sees one update instead of a flicker per file.
+   */
+  private async runBatch<T>(label: string, fn: (progress: (n: number, of: number) => void) => Promise<T>): Promise<T> {
+    const scroller = this.scrollerEl;
+    const keepTop = scroller?.scrollTop ?? 0;
+    const keepLeft = scroller?.scrollLeft ?? 0;
+    this.busy = true;
+    this.containerEl.addClass("gridsense-busy");
+    const notice = new Notice(`GridSense: ${label} — grid is read-only until this finishes`, 0);
+    this.busyEl?.setText(`⏳ ${label}…`);
+    this.busyEl?.show();
+    try {
+      return await fn((n, of) => {
+        this.busyEl?.setText(`⏳ ${label} ${n}/${of}`);
+        notice.setMessage(
+          `GridSense: ${label} ${n}/${of} — grid is read-only and won't repaint until this finishes`
+        );
+      });
+    } finally {
+      this.busy = false;
+      this.containerEl.removeClass("gridsense-busy");
+      this.busyEl?.hide();
+      notice.hide();
+      await this.render();
+      if (scroller) {
+        scroller.scrollTop = keepTop;
+        scroller.scrollLeft = keepLeft;
+        this.renderWindow(true);
+      }
+    }
+  }
+
   private flushPendingRefresh() {
     if (!this.pendingWhileEditing) return;
     this.pendingWhileEditing = false;
@@ -224,13 +269,17 @@ export class GridView extends ItemView {
       b.addEventListener("click", fn);
       return b;
     };
-    mkBtn("↺", "Recompile from notes (also re-derives row order)", () => {
+    mkBtn("↺", "Recompile from notes (also re-derives row order and filtering)", () => {
+      this.resetFilterMembership();
       this.resetRowOrder();
       this.attachStore();
       void this.render();
     });
     mkBtn("▦ columns", "Views, show/hide columns, heading & formula columns", () =>
       this.openColumnsModal()
+    );
+    mkBtn("⛃ filters", "Stack property conditions (like Bases filters)", () =>
+      new FiltersModal(this).open()
     );
     mkBtn("⇅ find & replace", "Find & replace in selection (or whole grid)", () =>
       this.openFindReplace()
@@ -253,15 +302,33 @@ export class GridView extends ItemView {
         void this.render();
       }
     );
-    const filter = bar.createEl("input", {
+    const filterWrap = bar.createDiv({ cls: "gridsense-filter-wrap" });
+    const filter = filterWrap.createEl("input", {
       cls: "gridsense-filter",
-      type: "search",
+      type: "text",
       attr: { placeholder: "filter rows…" },
     });
     filter.value = this.cfg().filter ?? "";
+    const clearBtn = filterWrap.createEl("button", {
+      cls: "gridsense-filter-clear",
+      text: "✕",
+      attr: { "aria-label": "Clear filter" },
+    });
+    const syncClear = () => (filter.value ? clearBtn.show() : clearBtn.hide());
+    syncClear();
+    clearBtn.addEventListener("click", () => {
+      filter.value = "";
+      syncClear();
+      this.cfg().filter = "";
+      this.stickyRows = null;
+      this.saveDebounced();
+      void this.render();
+      filter.focus();
+    });
     const applyFilter = debounce(
       () => {
         this.cfg().filter = filter.value;
+        this.stickyRows = null; // a new filter re-decides membership
         this.resetRowOrder();
         this.saveDebounced();
         this.requestRender();
@@ -269,7 +336,10 @@ export class GridView extends ItemView {
       200,
       true
     );
-    filter.addEventListener("input", applyFilter);
+    filter.addEventListener("input", () => {
+      syncClear();
+      applyFilter();
+    });
 
     this.pendingEl = bar.createSpan({
       cls: "gridsense-pending",
@@ -280,6 +350,8 @@ export class GridView extends ItemView {
     this.warnEl.setAttr("title", "Open columns & views to hide columns or set a row limit");
     this.warnEl.addEventListener("click", () => this.openColumnsModal());
     this.warnEl.hide();
+    this.busyEl = bar.createSpan({ cls: "gridsense-busy-badge" });
+    this.busyEl.hide();
     this.hiddenEl = bar.createEl("button", { cls: "gridsense-hidden-warn" });
     this.hiddenEl.addEventListener("click", () => this.openColumnsModal());
     this.hiddenEl.hide();
@@ -294,6 +366,7 @@ export class GridView extends ItemView {
 
   async render() {
     if (!this.store || !this.scrollerEl) return;
+    if (this.busy) return; // deferred until the batch finishes
     // Always await the compile: the old fire-and-forget + re-render chain
     // could drop the follow-up render, leaving the grid on stale rows. The
     // snapshot preload already guarantees a fast first paint, and compiles
@@ -326,11 +399,27 @@ export class GridView extends ItemView {
 
     // View pipeline: filter → sort → limit.
     let rows = this.store.rows.slice();
+    // Stacked conditions run first — the toolbar's quick filter narrows what
+    // they leave behind.
+    const stack = cfg.filters;
+    const activeConds = (stack?.conditions ?? []).filter((c) => c.prop);
+    if (activeConds.length) {
+      const keep = this.stickyRows;
+      rows = rows.filter((r) => {
+        if (keep?.has(r.file.path)) return true;
+        return stack?.conjunction === "or"
+          ? activeConds.some((c) => matches(r, c))
+          : activeConds.every((c) => matches(r, c));
+      });
+    }
     const needle = (cfg.filter ?? "").trim().toLowerCase();
     const specs = cfg.formulas ?? [];
     if (specs.length) await evaluateFormulas(this.app, specs, rows);
     if (needle) {
+      const keep = this.stickyRows;
       rows = rows.filter((r) => {
+        // Already on screen for this filter? Stay put until the filter changes.
+        if (keep?.has(r.file.path)) return true;
         if (r.file.basename.toLowerCase().includes(needle)) return true;
         for (const c of this.cols) {
           if (c.kind === "file") continue;
@@ -344,6 +433,11 @@ export class GridView extends ItemView {
         }
         return false;
       });
+      this.stickyRows = new Set(rows.map((r) => r.file.path));
+    } else if (activeConds.length) {
+      this.stickyRows = new Set(rows.map((r) => r.file.path));
+    } else {
+      this.stickyRows = null;
     }
     const sort = cfg.sort;
     if (sort && !this.frozenPathOrder) {
@@ -603,6 +697,9 @@ export class GridView extends ItemView {
     this.buildFooter(table);
     // Re-stack frozen rows from their ACTUAL heights — estimated offsets left
     // hairline gaps that let scrolled content show through.
+    const summaryEl = table.querySelector("tfoot tr.gridsense-summary") as HTMLElement | null;
+    if (summaryEl && summaryEl.offsetHeight > 4)
+      table.style.setProperty("--gridsense-summary-h", `${summaryEl.offsetHeight - 1}px`);
     const headerRowEl = thead.querySelector("tr") as HTMLElement | null;
     if (headerRowEl && headerRowEl.offsetHeight > 8) {
       this.headerH = headerRowEl.offsetHeight;
@@ -965,8 +1062,13 @@ export class GridView extends ItemView {
         text: alias ?? target,
       });
       a.setAttr("title", linkPath);
-      const resolved = this.app.metadataCache.getFirstLinkpathDest(target.trim(), sourcePath);
-      if (!resolved) a.addClass("is-unresolved");
+      // getFirstLinkpathDest wants the link path without a heading/block ref.
+      const resolved = this.app.metadataCache.getFirstLinkpathDest(
+        target.trim().replace(/\.md$/i, ""),
+        sourcePath
+      );
+      if (resolved) a.setAttr("data-href", resolved.path);
+      else a.addClass("is-unresolved");
       a.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -1044,6 +1146,7 @@ export class GridView extends ItemView {
         new ColumnWidthModal(this, c).open();
       })
     );
+    addToolboxMenu(this.app, menu, { perColumn: true });
     menu.addSeparator();
     menu.addItem((i) =>
       i.setTitle("Add column…").setIcon("plus").onClick(() => new NewColumnModal(this).open())
@@ -1219,6 +1322,10 @@ export class GridView extends ItemView {
   // ------------------------------------------------------------------ editing
 
   private beginEdit(ri: number, ci: number, seed?: string) {
+    if (this.busy) {
+      new Notice("GridSense: hold on — a batch update is still running");
+      return;
+    }
     const c = this.cols[ci];
     if (!c || c.kind === "file") return;
     if (c.kind === "heading" || c.kind === "formula") {
@@ -1388,7 +1495,10 @@ export class GridView extends ItemView {
       return;
     }
     this.applyLocal(writes);
-    const n = await this.engine.apply(`fill ${dir}`, writes);
+    const n = await this.runBatch(`filling ${writes.length} cells`, async (progress) => {
+      progress(0, writes.length);
+      return this.engine.apply(`fill ${dir}`, writes, progress);
+    });
     new Notice(`GridSense: filled ${n} cell${n === 1 ? "" : "s"} ${dir}`);
   }
 
@@ -1591,6 +1701,11 @@ export class GridView extends ItemView {
     this.pinnedNew.clear();
   }
 
+  /** Re-decide which rows the filter keeps (used by ↺ / recompile). */
+  private resetFilterMembership() {
+    this.stickyRows = null;
+  }
+
   /** Duplicate a note: full content copy as "name (copy).md" (numbered when
    * taken). TODO (logged): settings-driven naming template. */
   async duplicateNote(file: TFile) {
@@ -1761,6 +1876,17 @@ export class GridView extends ItemView {
   commandColumns() {
     this.openColumnsModal();
   }
+  commandFilters() {
+    new FiltersModal(this).open();
+  }
+
+  /** Filters changed: re-decide membership and repaint. */
+  async filtersChanged() {
+    this.stickyRows = null;
+    this.resetRowOrder();
+    await this.plugin.saveSettings();
+    await this.render();
+  }
   /** History scoped to one note / property / cell, with restore buttons. */
   async openScopedHistory(scope: { path?: string; key?: string; label: string }) {
     const all = await readHistory(this.app, this.folder);
@@ -1783,6 +1909,7 @@ export class GridView extends ItemView {
     new HistoryLogModal(this.app, this.folder, entries).open();
   }
   commandRecompile() {
+    this.resetFilterMembership();
     this.resetRowOrder();
     this.attachStore();
     void this.render();
@@ -2163,6 +2290,30 @@ class ColumnsModal extends Modal {
         });
       });
 
+    c.createEl("div", { cls: "setting-item-heading", text: "Property tools" });
+    if (toolboxInstalled(this.view.app)) {
+      c.createDiv({
+        cls: "gridsense-props-hint",
+        text: "Provided by Bases Toolbox — GridSense launches its tools rather than duplicating them.",
+      });
+      for (const tool of TOOLBOX_TOOLS)
+        new Setting(c).setName(tool.title).addButton((b) =>
+          b.setButtonText("Open").onClick(() => {
+            this.close();
+            (
+              this.view.app as unknown as {
+                commands: { executeCommandById: (id: string) => boolean };
+              }
+            ).commands.executeCommandById(`bases-toolbox:${tool.command}`);
+          })
+        );
+    } else {
+      c.createDiv({
+        cls: "gridsense-props-hint",
+        text: "Install the Bases Toolbox plugin to get the format doctor, property index, duplicate finder, alias/allowed-value audits, inline-field migration and rollups here.",
+      });
+    }
+
     c.createEl("div", { cls: "setting-item-heading", text: "Rows" });
     new Setting(c)
       .setName("Row limit")
@@ -2186,6 +2337,98 @@ class ColumnsModal extends Modal {
           }
         });
       });
+  }
+}
+
+/** Bases-style stacked filters: any number of property conditions, all/any. */
+class FiltersModal extends Modal {
+  constructor(private view: GridView) {
+    super(view.app);
+  }
+
+  onOpen() {
+    this.titleEl.setText("Filters");
+    this.renderBody();
+  }
+
+  private cfg(): FolderConfig {
+    return this.view.plugin.folderConfig(this.view.scopeFolder());
+  }
+
+  private renderBody() {
+    const c = this.contentEl;
+    c.empty();
+    const cfg = this.cfg();
+    cfg.filters = cfg.filters ?? { conjunction: "and", conditions: [] };
+    const f = cfg.filters;
+
+    new Setting(c)
+      .setName("Match")
+      .setDesc("How the conditions below combine.")
+      .addDropdown((d) => {
+        d.addOption("and", "all conditions (AND)");
+        d.addOption("or", "any condition (OR)");
+        d.setValue(f.conjunction).onChange(async (v) => {
+          f.conjunction = v as "and" | "or";
+          await this.view.filtersChanged();
+        });
+      });
+
+    if (!f.conditions.length)
+      c.createDiv({ cls: "gridsense-props-empty", text: "No conditions — the grid shows every note in scope." });
+
+    f.conditions.forEach((cond, i) => {
+      new Setting(c)
+        .setName(i === 0 ? "Where" : f.conjunction === "or" ? "or" : "and")
+        .addText((t) => {
+          t.setPlaceholder("property");
+          t.setValue(cond.prop);
+          new ListSuggest(this.view.app, t.inputEl, () => this.view.propertyNameSuggestions());
+          t.onChange(async (v) => {
+            cond.prop = v.trim();
+            await this.view.filtersChanged();
+          });
+        })
+        .addDropdown((d) => {
+          for (const op of ["=", "!=", ">", "<", ">=", "<=", "contains", "empty", "not-empty"])
+            d.addOption(op, op);
+          d.setValue(cond.op).onChange(async (v) => {
+            cond.op = v as Condition["op"];
+            await this.view.filtersChanged();
+          });
+        })
+        .addText((t) => {
+          t.setPlaceholder("value");
+          t.setValue(cond.value);
+          t.onChange(async (v) => {
+            cond.value = v;
+            await this.view.filtersChanged();
+          });
+        })
+        .addExtraButton((b) =>
+          b.setIcon("trash").setTooltip("Remove").onClick(async () => {
+            f.conditions.splice(i, 1);
+            await this.view.filtersChanged();
+            this.renderBody();
+          })
+        );
+    });
+
+    new Setting(c)
+      .addButton((b) =>
+        b.setButtonText("Add condition").onClick(async () => {
+          f.conditions.push({ prop: "", op: "=", value: "" });
+          await this.view.filtersChanged();
+          this.renderBody();
+        })
+      )
+      .addButton((b) =>
+        b.setButtonText("Clear all").onClick(async () => {
+          f.conditions = [];
+          await this.view.filtersChanged();
+          this.renderBody();
+        })
+      );
   }
 }
 

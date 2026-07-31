@@ -99,7 +99,10 @@ export interface FolderConfig {
   /** Hidden property columns. */
   hidden: string[];
   sort?: { key: string; dir: SortDir } | null;
+  /** Quick substring filter from the toolbar. */
   filter?: string;
+  /** Stacked per-property conditions (Bases-style), applied before the quick filter. */
+  filters?: { conjunction: "and" | "or"; conditions: Condition[] };
   /** Per-column widths in px (keyed by colId). */
   widths?: Record<string, number>;
   wrap?: boolean;

@@ -41,8 +41,10 @@
 .gridsense-table th {
   position: sticky;
   top: 0;
-  z-index: 2;
-  background: var(--background-secondary);
+  /* Above frozen rows (3/4) and frozen columns (5) so the header is never
+     painted over while scrolling. */
+  z-index: 6;
+  background-color: var(--background-secondary);
   border: 1px solid var(--background-modifier-border);
   padding: 4px 8px;
   text-align: left;
@@ -301,7 +303,7 @@ td.gridsense-active {
 
 .gridsense-table tfoot td {
   position: sticky;
-  bottom: 0;
+  bottom: -1px; /* kill the sub-pixel gap under the floating footer */
   background: var(--background-secondary);
   z-index: 2;
   border: 1px solid var(--background-modifier-border);
@@ -316,7 +318,9 @@ td.gridsense-active {
 
 tfoot .gridsense-draft td {
   position: sticky;
-  bottom: calc(1.9em + 6px);
+  /* Sits directly on top of the summary row — computed from its real height
+     at runtime, so no hairline of scrolled content shows between them. */
+  bottom: var(--gridsense-summary-h, 1.9em);
   z-index: 2;
 }
 
@@ -362,17 +366,18 @@ tfoot .gridsense-draft td {
   display: none;
 }
 
+/* Obsidian's own "Properties" heading is redundant next to our switch button,
+   which already says which mode you'd move to. */
+.metadata-container.gridsense-has-toggle .metadata-properties-heading .metadata-properties-title {
+  display: none;
+}
+
 .gridsense-inline-strip {
   padding: 4px 0 8px;
 }
 
-.gridsense-inline-strip::before {
-  content: "GridSense properties";
-  display: block;
-  font-size: var(--font-ui-smaller);
-  color: var(--text-faint);
-  margin-bottom: 4px;
-}
+/* No caption for the CURRENT mode — the only label on screen is the button
+   that switches you to the OTHER one. */
 
 .gridsense-props-host {
   outline: none;
@@ -555,6 +560,17 @@ tfoot .gridsense-draft td {
   cursor: pointer;
 }
 
+/* A link to a note that doesn't exist must LOOK missing. Themes vary wildly in
+   what they do with --link-unresolved-*, and several colour it the same as a
+   normal link, so style it ourselves: faded, dashed underline. */
+.gridsense-table a.gridsense-wikilink.is-unresolved,
+.gridsense-props-value a.gridsense-wikilink.is-unresolved {
+  color: var(--text-muted);
+  opacity: 0.65;
+  text-decoration: underline dashed;
+  text-underline-offset: 2px;
+}
+
 .gridsense-tailpad td {
   height: 3.2em;
   border: none;
@@ -597,8 +613,8 @@ tfoot .gridsense-draft td {
 }
 
 .gridsense-table th.gridsense-frozen-col {
-  z-index: 5;
-  background: var(--background-secondary);
+  z-index: 7;
+  background-color: var(--background-secondary);
 }
 
 .gridsense-table td.gridsense-frozen-col.gridsense-rownum {
@@ -607,7 +623,7 @@ tfoot .gridsense-draft td {
 
 .gridsense-frozen-row td {
   position: sticky;
-  z-index: 2;
+  z-index: 3;
   /* Opaque: scrolled rows must never show through a frozen row. */
   background-color: var(--background-primary);
   box-shadow: 0 1px 0 var(--background-modifier-border);
@@ -661,4 +677,42 @@ tfoot .gridsense-draft td {
 }
 .gridsense-import-modal .gridsense-zoom-text {
   min-height: 22vh;
+}
+
+
+/* ------------------------- filter box + busy state ----------------------- */
+
+.gridsense-filter-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.gridsense-filter-clear {
+  position: absolute;
+  right: 4px;
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  box-shadow: none;
+}
+.gridsense-filter-clear:hover {
+  color: var(--text-normal);
+}
+
+.gridsense-busy .gridsense-scroller {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.gridsense-busy-badge {
+  color: var(--text-on-accent);
+  background: var(--interactive-accent);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
 }
