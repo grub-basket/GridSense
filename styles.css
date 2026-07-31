@@ -718,3 +718,8 @@ tfoot .gridsense-draft td {
   font-size: var(--font-ui-smaller);
   font-weight: 600;
 }
+
+.gridsense-viewpick {
+  font-size: var(--font-ui-smaller);
+  max-width: 190px;
+}

@@ -1,6 +1,7 @@
 import {
   AbstractInputSuggest,
   App,
+  FuzzySuggestModal,
   ItemView,
   Menu,
   Modal,
@@ -90,6 +91,9 @@ export class GridView extends ItemView {
   /** While a batch write runs the grid is read-only and renders are deferred. */
   private busy = false;
   private busyEl: HTMLElement | null = null;
+  private viewSelectEl: HTMLSelectElement | null = null;
+  /** Name of the view currently applied, for the picker's selected state. */
+  private activeView = "";
   private headerH = 28;
   /** Notes created from draft rows keep their draft-side position. */
   private pinnedNew = new Map<string, "top" | "bottom">();
@@ -131,6 +135,7 @@ export class GridView extends ItemView {
     bind(["Mod"], "z", () => void this.undo());
     bind(["Mod", "Shift"], "z", () => void this.engine.redo());
     bind(["Mod"], "y", () => void this.engine.redo());
+    bind(["Mod"], "g", () => new JumpToColumnModal(this).open());
   }
 
   getViewType() {
@@ -278,6 +283,7 @@ export class GridView extends ItemView {
     mkBtn("▦ columns", "Views, show/hide columns, heading & formula columns", () =>
       this.openColumnsModal()
     );
+    mkBtn("⇥ column", "Jump to a column (⌘/Ctrl+G)", () => new JumpToColumnModal(this).open());
     mkBtn("⛃ filters", "Stack property conditions (like Bases filters)", () =>
       new FiltersModal(this).open()
     );
@@ -350,6 +356,22 @@ export class GridView extends ItemView {
     this.warnEl.setAttr("title", "Open columns & views to hide columns or set a row limit");
     this.warnEl.addEventListener("click", () => this.openColumnsModal());
     this.warnEl.hide();
+    // Saved views, switchable without opening a modal.
+    this.viewSelectEl = bar.createEl("select", { cls: "gridsense-viewpick dropdown" });
+    this.viewSelectEl.addEventListener("change", () => {
+      const name = this.viewSelectEl?.value ?? "";
+      if (name === "__save") {
+        this.syncViewPicker();
+        new SaveViewModal(this).open();
+      } else if (name === "__manage") {
+        this.syncViewPicker();
+        this.openColumnsModal();
+      } else if (name) {
+        void this.applyView(name);
+      }
+    });
+    this.syncViewPicker();
+
     this.busyEl = bar.createSpan({ cls: "gridsense-busy-badge" });
     this.busyEl.hide();
     this.hiddenEl = bar.createEl("button", { cls: "gridsense-hidden-warn" });
@@ -1876,8 +1898,122 @@ export class GridView extends ItemView {
   commandColumns() {
     this.openColumnsModal();
   }
+  commandJumpToColumn() {
+    new JumpToColumnModal(this).open();
+  }
+
+  /** Column labels in display order (for the jump picker). */
+  columnChoices(): { label: string; index: number }[] {
+    return this.cols.map((c, index) => ({
+      label:
+        c.kind === "file"
+          ? "file (note name)"
+          : c.kind === "heading"
+            ? `# ${c.key}`
+            : c.kind === "formula"
+              ? `ƒ ${c.key}`
+              : this.cfg().rename?.[c.key] ?? c.key,
+      index,
+    }));
+  }
+
+  /**
+   * Scroll a column into view and put the cursor on it — long grids are
+   * miserable to scroll horizontally by hand.
+   */
+  jumpToColumn(index: number) {
+    const scroller = this.scrollerEl;
+    if (!scroller || index < 0 || index >= this.cols.length) return;
+    const cols = Array.from(this.tableEl?.querySelectorAll("colgroup col") ?? []);
+    let left = 0;
+    for (let i = 0; i <= index; i++) left += parseInt((cols[i] as HTMLElement)?.style.width) || 0;
+    const width = parseInt((cols[index + 1] as HTMLElement)?.style.width) || 160;
+    // Frozen columns cover the left edge, so land the column just past them.
+    const frozenWidth = this.frozenLeft.length
+      ? this.frozenLeft[this.frozenLeft.length - 1] +
+        (parseInt((cols[this.frozenLeft.length] as HTMLElement)?.style.width) || 0)
+      : 44;
+    const target = Math.max(0, left - frozenWidth);
+    scroller.scrollTo({ left: target, behavior: "smooth" });
+    const row = Math.max(0, this.head?.row ?? this.winStart);
+    this.setSel({ row, col: index });
+    const label = this.columnChoices()[index]?.label ?? "column";
+    this.updateStatus(`jumped to ${label}`);
+    void width;
+  }
   commandFilters() {
     new FiltersModal(this).open();
+  }
+
+  /** Rebuild the toolbar's view dropdown from the saved views. */
+  syncViewPicker() {
+    const sel = this.viewSelectEl;
+    if (!sel) return;
+    const views = Object.keys(this.cfg().views ?? {}).sort();
+    sel.empty();
+    sel.createEl("option", { value: "", text: views.length ? "— view —" : "— no saved views —" });
+    for (const v of views) sel.createEl("option", { value: v, text: v });
+    sel.createEl("option", { value: "__save", text: "＋ Save current as view…" });
+    sel.createEl("option", { value: "__manage", text: "⚙ Manage views…" });
+    sel.value = this.activeView && views.includes(this.activeView) ? this.activeView : "";
+  }
+
+  /** Apply a saved view: columns, sort, filters, widths, wrap, formulas. */
+  async applyView(name: string) {
+    const cfg = this.cfg();
+    const saved = cfg.views?.[name];
+    if (!saved) return;
+    // REPLACE, don't merge: a setting the view doesn't mention (no sort, no
+    // filter) must be cleared, otherwise the previous view's sort leaks in.
+    for (const k of Object.keys(cfg))
+      if (k !== "views") delete (cfg as unknown as Record<string, unknown>)[k];
+    Object.assign(cfg, structuredClone(saved), {
+      views: cfg.views,
+      headingColumns: saved.headingColumns ?? [],
+      hidden: saved.hidden ?? [],
+    });
+    this.activeView = name;
+    await this.plugin.saveSettings();
+    this.stickyRows = null;
+    this.resetRowOrder();
+    this.reattachStore(); // heading columns may differ
+    await this.render();
+    this.syncViewPicker();
+    new Notice(`GridSense: view "${name}"`);
+  }
+
+  /** Save the current setup as a named view. */
+  async saveView(name: string) {
+    const cfg = this.cfg();
+    cfg.views = cfg.views ?? {};
+    const { views: _omit, ...rest } = cfg;
+    cfg.views[name] = structuredClone(rest);
+    this.activeView = name;
+    await this.plugin.saveSettings();
+    this.syncViewPicker();
+    new Notice(`GridSense: saved view "${name}"`);
+  }
+
+  async deleteView(name: string) {
+    const cfg = this.cfg();
+    if (cfg.views) delete cfg.views[name];
+    if (this.activeView === name) this.activeView = "";
+    await this.plugin.saveSettings();
+    this.syncViewPicker();
+  }
+
+  viewNames(): string[] {
+    return Object.keys(this.cfg().views ?? {}).sort();
+  }
+
+  /** Forget any manual column drag order and fall back to note order. */
+  async resetColumnOrder() {
+    const cfg = this.cfg();
+    delete cfg.order;
+    await this.plugin.saveSettings();
+    this.reattachStore();
+    await this.render();
+    new Notice("GridSense: column order reset to the order properties appear in your notes");
   }
 
   /** Filters changed: re-decide membership and repaint. */
@@ -2113,41 +2249,35 @@ class ColumnsModal extends Modal {
 
     // Views: apply/save/delete named snapshots of this whole config.
     c.createEl("div", { cls: "setting-item-heading", text: "Views" });
+    c.createDiv({
+      cls: "gridsense-props-hint",
+      text: "A view remembers this grid's columns, order, widths, sort, filters, wrap, limit and formulas. Switch between them from the toolbar dropdown.",
+    });
     const views = cfg.views ?? {};
     const names = Object.keys(views).sort();
-    if (names.length) {
+    for (const n of names)
       new Setting(c)
-        .setName("Apply view")
-        .setDesc("Restores columns, sort, filter, widths, wrap")
-        .addDropdown((d) => {
-          d.addOption("", "— pick —");
-          for (const n of names) d.addOption(n, n);
-          d.onChange(async (n) => {
-            if (!n) return;
-            const v = views[n];
-            Object.assign(cfg, structuredClone(v), { views: cfg.views });
-            await this.view.plugin.saveSettings();
-            this.view.reattachStore(); // heading columns may differ — recompile
-            await this.view.refresh();
+        .setName(n)
+        .addButton((b) =>
+          b.setButtonText("Apply").onClick(async () => {
+            this.close();
+            await this.view.applyView(n);
+          })
+        )
+        .addButton((b) =>
+          b.setButtonText("Overwrite").onClick(async () => {
+            await this.view.saveView(n);
             this.renderBody();
-            new Notice(`GridSense: applied view "${n}"`);
-          });
-        })
+          })
+        )
         .addExtraButton((b) =>
-          b.setIcon("trash").setTooltip("Delete a view").onClick(() => {
-            const menu = new Menu();
-            for (const n of names)
-              menu.addItem((i) =>
-                i.setTitle(`Delete "${n}"`).onClick(async () => {
-                  delete cfg.views![n];
-                  await this.view.plugin.saveSettings();
-                  this.renderBody();
-                })
-              );
-            menu.showAtMouseEvent(new MouseEvent("contextmenu"));
+          b.setIcon("trash").setTooltip("Delete view").onClick(async () => {
+            await this.view.deleteView(n);
+            this.renderBody();
           })
         );
-    }
+    if (!names.length)
+      c.createDiv({ cls: "gridsense-props-empty", text: "No saved views yet." });
     let viewName = "";
     new Setting(c)
       .setName("Save current as view")
@@ -2159,16 +2289,28 @@ class ColumnsModal extends Modal {
         b.setButtonText("Save").onClick(async () => {
           const name = viewName.trim();
           if (!name) return;
-          cfg.views = cfg.views ?? {};
-          const { views: _omit, ...rest } = cfg;
-          cfg.views[name] = structuredClone(rest);
-          await this.view.plugin.saveSettings();
+          await this.view.saveView(name);
           this.renderBody();
-          new Notice(`GridSense: saved view "${name}"`);
         })
       );
 
     c.createEl("div", { cls: "setting-item-heading", text: "Properties" });
+    new Setting(c)
+      .setName("Column order")
+      .setDesc(
+        cfg.order?.length
+          ? "Custom order — you've dragged columns in this grid."
+          : "Following the order the properties appear in your notes."
+      )
+      .addButton((b) =>
+        b
+          .setButtonText("Reset to note order")
+          .setDisabled(!cfg.order?.length)
+          .onClick(async () => {
+            await this.view.resetColumnOrder();
+            this.renderBody();
+          })
+      );
     new Setting(c).addButton((b) =>
       b.setButtonText("Add property column…").onClick(() => {
         this.close();
@@ -2429,6 +2571,61 @@ class FiltersModal extends Modal {
           this.renderBody();
         })
       );
+  }
+}
+
+/** Type-to-jump column picker — long grids are painful to scroll sideways. */
+class JumpToColumnModal extends FuzzySuggestModal<{ label: string; index: number }> {
+  constructor(private view: GridView) {
+    super(view.app);
+    this.setPlaceholder("Jump to column…");
+  }
+
+  getItems() {
+    return this.view.columnChoices();
+  }
+
+  getItemText(item: { label: string; index: number }) {
+    return item.label;
+  }
+
+  onChooseItem(item: { label: string; index: number }) {
+    this.view.jumpToColumn(item.index);
+  }
+}
+
+class SaveViewModal extends Modal {
+  constructor(private view: GridView) {
+    super(view.app);
+  }
+
+  onOpen() {
+    this.titleEl.setText("Save current setup as a view");
+    let value = "";
+    new Setting(this.contentEl)
+      .setName("View name")
+      .setDesc("Captures columns, order, widths, sort, filters, wrap, limit and formulas.")
+      .addText((t) => {
+        t.setPlaceholder("e.g. Triage");
+        t.onChange((v) => (value = v));
+        window.setTimeout(() => t.inputEl.focus(), 0);
+        t.inputEl.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && value.trim()) {
+            this.close();
+            void this.view.saveView(value.trim());
+          }
+        });
+      });
+    new Setting(this.contentEl).addButton((b) =>
+      b
+        .setButtonText("Save")
+        .setCta()
+        .onClick(() => {
+          if (!value.trim()) return;
+          this.close();
+          void this.view.saveView(value.trim());
+        })
+    );
   }
 }
 

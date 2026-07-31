@@ -14,6 +14,8 @@ export class GridStore {
   propColumns: string[] = [];
   private dirty = true;
   private compiling = false;
+  /** Note-order adopted once per store; later compiles only append. */
+  private orderAdopted = false;
   private detachFns: (() => void)[] = [];
 
   /**
@@ -172,15 +174,29 @@ export class GridStore {
       for (const k of Object.keys(row.fm)) counts.set(k, (counts.get(k) ?? 0) + 1);
       rows.push(row);
     }
-    // Column order must be STABLE: keys we already know keep their position,
-    // newly-seen keys are appended (most-used first among themselves).
-    // Sorting everything by usage each compile made columns jump around
-    // whenever values were filled in.
+    // Column order follows the order properties actually appear in the notes:
+    // walk the rows in order, appending each frontmatter key the first time we
+    // meet it. That matches what you see when you open a note, and it's stable
+    // (filling in values can't reshuffle it — an earlier version sorted by
+    // usage count and columns jumped around).
+    const natural: string[] = [];
+    const seen = new Set<string>();
+    for (const row of rows)
+      for (const k of Object.keys(row.fm))
+        if (!seen.has(k)) {
+          seen.add(k);
+          natural.push(k);
+        }
+    // Keys we already showed keep their slot; anything new lands where the
+    // notes put it.
     const known = this.propColumns.filter((k) => counts.has(k));
-    const fresh = [...counts.keys()]
-      .filter((k) => !this.propColumns.includes(k))
-      .sort((a, b) => (counts.get(b) ?? 0) - (counts.get(a) ?? 0) || a.localeCompare(b));
+    const fresh = natural.filter((k) => !known.includes(k));
     this.propColumns = [...known, ...fresh];
+    // First compile of a scope (or after ↺): adopt the note order wholesale.
+    if (!this.orderAdopted) {
+      this.propColumns = natural;
+      this.orderAdopted = true;
+    }
     // Resolve heading columns (async, body reads are cached by Obsidian).
     const hcols = this.headingColumns();
     if (hcols.length) {
