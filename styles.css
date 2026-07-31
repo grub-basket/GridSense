@@ -254,9 +254,11 @@ td.gridsense-active {
   font-size: var(--font-ui-small);
 }
 
-.gridsense-table th {
-  position: relative;
-}
+/* NOTE: do NOT set `position: relative` on th here — it silently overrides the
+   sticky header above and the column titles scroll away (only the frozen "#"
+   cell survives, because a later rule re-stickies it). `position: sticky` is
+   itself a positioned value, so it already anchors the absolutely-positioned
+   resize grip below. */
 
 .gridsense-col-grip {
   position: absolute;
