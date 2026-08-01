@@ -2305,13 +2305,41 @@ class ColumnsModal extends Modal {
     return this.view.plugin.folderConfig(this.view.scopeFolder());
   }
 
+  /**
+   * A collapsible section. Open/closed is remembered per section across
+   * openings (plugin settings, so it follows you between grids — the state is
+   * chrome, not grid data), with sensible defaults so the modal opens short.
+   */
+  private section(parent: HTMLElement, title: string, key: string, defaultOpen: boolean): HTMLElement {
+    const store = this.view.plugin.settings.columnsSections ?? {};
+    const open = store[key] ?? defaultOpen;
+    const wrap = parent.createDiv({ cls: "gridsense-section" });
+    const head = wrap.createDiv({ cls: "setting-item-heading gridsense-section-head" });
+    const chevron = head.createSpan({ cls: "gridsense-section-chevron" });
+    setIcon(chevron, open ? "chevron-down" : "chevron-right");
+    head.createSpan({ text: title });
+    const body = wrap.createDiv({ cls: "gridsense-section-body" });
+    if (!open) body.hide();
+    head.addEventListener("click", async () => {
+      const nowOpen = !body.isShown();
+      body.toggle(nowOpen);
+      setIcon(chevron, nowOpen ? "chevron-down" : "chevron-right");
+      this.view.plugin.settings.columnsSections = {
+        ...(this.view.plugin.settings.columnsSections ?? {}),
+        [key]: nowOpen,
+      };
+      await this.view.plugin.saveSettings();
+    });
+    return body;
+  }
+
   private renderBody() {
-    const c = this.contentEl;
-    c.empty();
+    const root = this.contentEl;
+    root.empty();
     const cfg = this.cfg();
 
     // Views: apply/save/delete named snapshots of this whole config.
-    c.createEl("div", { cls: "setting-item-heading", text: "Views" });
+    let c = this.section(root, "Views", "views", true);
     c.createDiv({
       cls: "gridsense-props-hint",
       text: "A view remembers this grid's columns, order, widths, sort, filters, wrap, limit and formulas. Switch between them from the toolbar dropdown.",
@@ -2357,7 +2385,7 @@ class ColumnsModal extends Modal {
         })
       );
 
-    c.createEl("div", { cls: "setting-item-heading", text: "Properties" });
+    c = this.section(root, "Properties", "properties", true);
     new Setting(c)
       .setName("Column order")
       .setDesc(
@@ -2394,7 +2422,7 @@ class ColumnsModal extends Modal {
       setting.nameEl.prepend(icon);
     }
 
-    c.createEl("div", { cls: "setting-item-heading", text: "Heading columns" });
+    c = this.section(root, "Heading columns", "headings", false);
     if (!cfg.headingColumns.length)
       c.createDiv({ cls: "gridsense-props-empty", text: "None yet — add one below." });
     for (const h of [...cfg.headingColumns]) {
@@ -2415,7 +2443,7 @@ class ColumnsModal extends Modal {
       })
     );
 
-    c.createEl("div", { cls: "setting-item-heading", text: "Formula columns" });
+    c = this.section(root, "Formula columns", "formulas", false);
     for (const f of [...(cfg.formulas ?? [])]) {
       new Setting(c)
         .setName(`ƒ ${f.name}`)
@@ -2495,7 +2523,7 @@ class ColumnsModal extends Modal {
         });
       });
 
-    c.createEl("div", { cls: "setting-item-heading", text: "Property tools" });
+    c = this.section(root, "Property tools", "tools", false);
     if (toolboxInstalled(this.view.app)) {
       c.createDiv({
         cls: "gridsense-props-hint",
@@ -2519,7 +2547,7 @@ class ColumnsModal extends Modal {
       });
     }
 
-    c.createEl("div", { cls: "setting-item-heading", text: "Rows" });
+    c = this.section(root, "Rows & layout", "rows", false);
     new Setting(c)
       .setName("Row limit")
       .setDesc("0 = unlimited (the default — virtualized rendering keeps big grids fast). The row counter shows when a limit is trimming the grid.")
@@ -2558,6 +2586,34 @@ class FiltersModal extends Modal {
 
   private cfg(): FolderConfig {
     return this.view.plugin.folderConfig(this.view.scopeFolder());
+  }
+
+  /**
+   * A collapsible section. Open/closed is remembered per section across
+   * openings (plugin settings, so it follows you between grids — the state is
+   * chrome, not grid data), with sensible defaults so the modal opens short.
+   */
+  private section(parent: HTMLElement, title: string, key: string, defaultOpen: boolean): HTMLElement {
+    const store = this.view.plugin.settings.columnsSections ?? {};
+    const open = store[key] ?? defaultOpen;
+    const wrap = parent.createDiv({ cls: "gridsense-section" });
+    const head = wrap.createDiv({ cls: "setting-item-heading gridsense-section-head" });
+    const chevron = head.createSpan({ cls: "gridsense-section-chevron" });
+    setIcon(chevron, open ? "chevron-down" : "chevron-right");
+    head.createSpan({ text: title });
+    const body = wrap.createDiv({ cls: "gridsense-section-body" });
+    if (!open) body.hide();
+    head.addEventListener("click", async () => {
+      const nowOpen = !body.isShown();
+      body.toggle(nowOpen);
+      setIcon(chevron, nowOpen ? "chevron-down" : "chevron-right");
+      this.view.plugin.settings.columnsSections = {
+        ...(this.view.plugin.settings.columnsSections ?? {}),
+        [key]: nowOpen,
+      };
+      await this.view.plugin.saveSettings();
+    });
+    return body;
   }
 
   private renderBody() {

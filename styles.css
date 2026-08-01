@@ -728,3 +728,32 @@ tfoot .gridsense-draft td {
   border-color: var(--color-orange);
   color: var(--color-orange);
 }
+
+/* ---------------------- collapsible modal sections ----------------------- */
+
+.gridsense-section-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  border-radius: 4px;
+  padding: 4px 6px;
+  margin-top: 4px;
+}
+.gridsense-section-head:hover {
+  background: var(--background-modifier-hover);
+}
+
+.gridsense-section-chevron {
+  display: inline-flex;
+  color: var(--text-muted);
+}
+.gridsense-section-chevron svg {
+  width: 14px;
+  height: 14px;
+}
+
+.gridsense-section-body {
+  padding-left: 4px;
+}

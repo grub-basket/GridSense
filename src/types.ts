@@ -137,6 +137,8 @@ export interface GridSenseSettings {
   trashFolder: string;
   /** Per-note overrides for the properties takeover (path → on/off). */
   inlinePropsOverrides: Record<string, boolean>;
+  /** Remembered open/closed state of the columns-modal sections. */
+  columnsSections?: Record<string, boolean>;
 }
 
 export const DEFAULT_SETTINGS: GridSenseSettings = {
