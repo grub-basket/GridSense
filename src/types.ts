@@ -117,6 +117,10 @@ export interface FolderConfig {
   order?: string[];
   /** Display-name overrides for property columns (key → shown name). */
   rename?: Record<string, string>;
+  /** Per-grid overrides for the columns-modal section collapse state.
+   *  Unset sections fall back to the plugin-wide defaults. Chrome, not data:
+   *  excluded from view snapshots and from drift detection. */
+  sections?: Record<string, boolean>;
   /** Named snapshots of this config, applied via the columns manager. */
   views?: Record<string, Omit<FolderConfig, "views">>;
 }
@@ -137,8 +141,9 @@ export interface GridSenseSettings {
   trashFolder: string;
   /** Per-note overrides for the properties takeover (path → on/off). */
   inlinePropsOverrides: Record<string, boolean>;
-  /** Remembered open/closed state of the columns-modal sections. */
-  columnsSections?: Record<string, boolean>;
+  /** DEFAULT open/closed state of the columns-modal sections, vault-wide.
+   *  Individual grids can override these (FolderConfig.sections). */
+  columnsSectionDefaults?: Record<string, boolean>;
 }
 
 export const DEFAULT_SETTINGS: GridSenseSettings = {

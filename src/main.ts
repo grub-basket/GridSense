@@ -348,6 +348,47 @@ class GridSenseSettingTab extends PluginSettingTab {
           t.inputEl.addEventListener("blur", () => void this.plugin.configFile?.saveNow());
         });
 
+    this.containerEl.createEl("div", { cls: "setting-item-heading", text: "Columns & views modal" });
+    this.containerEl.createEl("div", {
+      cls: "gridsense-props-hint",
+      text: "Which sections start open. Each grid remembers its own choices and overrides these.",
+    });
+    const SECTIONS: { key: string; label: string; fallback: boolean }[] = [
+      { key: "views", label: "Views", fallback: true },
+      { key: "properties", label: "Properties", fallback: true },
+      { key: "headings", label: "Heading columns", fallback: false },
+      { key: "formulas", label: "Formula columns", fallback: false },
+      { key: "tools", label: "Property tools", fallback: false },
+      { key: "rows", label: "Rows & layout", fallback: false },
+    ];
+    for (const sec of SECTIONS)
+      new Setting(this.containerEl).setName(sec.label).addToggle((t) =>
+        t
+          .setValue(this.plugin.settings.columnsSectionDefaults?.[sec.key] ?? sec.fallback)
+          .onChange(async (v) => {
+            this.plugin.settings.columnsSectionDefaults = {
+              ...(this.plugin.settings.columnsSectionDefaults ?? {}),
+              [sec.key]: v,
+            };
+            await this.plugin.saveSettings();
+          })
+      );
+    new Setting(this.containerEl)
+      .setName("Clear every grid's section overrides")
+      .setDesc("Makes all grids follow the defaults above again.")
+      .addButton((b) =>
+        b.setButtonText("Clear overrides").onClick(async () => {
+          let n = 0;
+          for (const cfg of Object.values(this.plugin.settings.folders))
+            if (cfg.sections) {
+              delete cfg.sections;
+              n++;
+            }
+          await this.plugin.saveSettings();
+          new Notice(`GridSense: cleared section overrides on ${n} grid${n === 1 ? "" : "s"}`);
+        })
+      );
+
     this.containerEl.createEl("div", { cls: "setting-item-heading", text: "Notes & grids" });
     new Setting(this.containerEl)
       .setName("GridSense trash folder")

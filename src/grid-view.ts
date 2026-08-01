@@ -1979,8 +1979,9 @@ export class GridView extends ItemView {
       };
       return JSON.stringify(norm(o));
     };
-    const { views: _a, ...live } = cfg;
-    const { views: _b, ...snap } = saved as FolderConfig;
+    // `sections` is modal chrome — collapsing a section isn't a view change.
+    const { views: _a, sections: _sa, ...live } = cfg;
+    const { views: _b, sections: _sb, ...snap } = saved as FolderConfig;
     return { name: this.activeView, drifted: canon(live) !== canon(snap) };
   }
 
@@ -2028,10 +2029,12 @@ export class GridView extends ItemView {
     if (!saved) return;
     // REPLACE, don't merge: a setting the view doesn't mention (no sort, no
     // filter) must be cleared, otherwise the previous view's sort leaks in.
+    const keepSections = cfg.sections;
     for (const k of Object.keys(cfg))
       if (k !== "views") delete (cfg as unknown as Record<string, unknown>)[k];
     Object.assign(cfg, structuredClone(saved), {
       views: cfg.views,
+      sections: keepSections,
       headingColumns: saved.headingColumns ?? [],
       hidden: saved.hidden ?? [],
     });
@@ -2049,7 +2052,7 @@ export class GridView extends ItemView {
   async saveView(name: string) {
     const cfg = this.cfg();
     cfg.views = cfg.views ?? {};
-    const { views: _omit, ...rest } = cfg;
+    const { views: _omit, sections: _chrome, ...rest } = cfg;
     cfg.views[name] = structuredClone(rest);
     this.activeView = name;
     await this.plugin.saveSettings();
@@ -2311,8 +2314,11 @@ class ColumnsModal extends Modal {
    * chrome, not grid data), with sensible defaults so the modal opens short.
    */
   private section(parent: HTMLElement, title: string, key: string, defaultOpen: boolean): HTMLElement {
-    const store = this.view.plugin.settings.columnsSections ?? {};
-    const open = store[key] ?? defaultOpen;
+    // This grid's choice wins; otherwise the vault-wide default; otherwise the
+    // built-in default for that section.
+    const perGrid = this.cfg().sections ?? {};
+    const globals = this.view.plugin.settings.columnsSectionDefaults ?? {};
+    const open = perGrid[key] ?? globals[key] ?? defaultOpen;
     const wrap = parent.createDiv({ cls: "gridsense-section" });
     const head = wrap.createDiv({ cls: "setting-item-heading gridsense-section-head" });
     const chevron = head.createSpan({ cls: "gridsense-section-chevron" });
@@ -2324,11 +2330,10 @@ class ColumnsModal extends Modal {
       const nowOpen = !body.isShown();
       body.toggle(nowOpen);
       setIcon(chevron, nowOpen ? "chevron-down" : "chevron-right");
-      this.view.plugin.settings.columnsSections = {
-        ...(this.view.plugin.settings.columnsSections ?? {}),
-        [key]: nowOpen,
-      };
+      const cfg = this.cfg();
+      cfg.sections = { ...(cfg.sections ?? {}), [key]: nowOpen };
       await this.view.plugin.saveSettings();
+      this.view.syncViewPicker();
     });
     return body;
   }
@@ -2549,6 +2554,20 @@ class ColumnsModal extends Modal {
 
     c = this.section(root, "Rows & layout", "rows", false);
     new Setting(c)
+      .setName("Follow the default section layout")
+      .setDesc("Forget this grid's collapse choices and use the plugin defaults again.")
+      .addButton((b) =>
+        b
+          .setButtonText("Reset sections")
+          .setDisabled(!Object.keys(cfg.sections ?? {}).length)
+          .onClick(async () => {
+            delete cfg.sections;
+            await this.view.plugin.saveSettings();
+            this.renderBody();
+          })
+      );
+
+    new Setting(c)
       .setName("Row limit")
       .setDesc("0 = unlimited (the default — virtualized rendering keeps big grids fast). The row counter shows when a limit is trimming the grid.")
       .addText((t) => {
@@ -2594,8 +2613,11 @@ class FiltersModal extends Modal {
    * chrome, not grid data), with sensible defaults so the modal opens short.
    */
   private section(parent: HTMLElement, title: string, key: string, defaultOpen: boolean): HTMLElement {
-    const store = this.view.plugin.settings.columnsSections ?? {};
-    const open = store[key] ?? defaultOpen;
+    // This grid's choice wins; otherwise the vault-wide default; otherwise the
+    // built-in default for that section.
+    const perGrid = this.cfg().sections ?? {};
+    const globals = this.view.plugin.settings.columnsSectionDefaults ?? {};
+    const open = perGrid[key] ?? globals[key] ?? defaultOpen;
     const wrap = parent.createDiv({ cls: "gridsense-section" });
     const head = wrap.createDiv({ cls: "setting-item-heading gridsense-section-head" });
     const chevron = head.createSpan({ cls: "gridsense-section-chevron" });
@@ -2607,11 +2629,10 @@ class FiltersModal extends Modal {
       const nowOpen = !body.isShown();
       body.toggle(nowOpen);
       setIcon(chevron, nowOpen ? "chevron-down" : "chevron-right");
-      this.view.plugin.settings.columnsSections = {
-        ...(this.view.plugin.settings.columnsSections ?? {}),
-        [key]: nowOpen,
-      };
+      const cfg = this.cfg();
+      cfg.sections = { ...(cfg.sections ?? {}), [key]: nowOpen };
       await this.view.plugin.saveSettings();
+      this.view.syncViewPicker();
     });
     return body;
   }
