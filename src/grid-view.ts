@@ -366,8 +366,14 @@ export class GridView extends ItemView {
       } else if (name === "__manage") {
         this.syncViewPicker();
         this.openColumnsModal();
+      } else if (name === "__update") {
+        void this.saveView(this.activeView);
+      } else if (name === "__revert") {
+        void this.applyView(this.activeView);
       } else if (name) {
         void this.applyView(name);
+      } else {
+        this.syncViewPicker();
       }
     });
     this.syncViewPicker();
@@ -509,6 +515,7 @@ export class GridView extends ItemView {
     this.viewRows = limit > 0 ? rows.slice(0, limit) : rows;
 
     this.buildTable();
+    this.syncViewPicker(); // reflect drift after any config change
     this.paintSelection();
     // Prominent row count: total when everything shows, "x of y" otherwise.
     const totalAll = this.store.rows.length;
@@ -1945,17 +1952,73 @@ export class GridView extends ItemView {
     new FiltersModal(this).open();
   }
 
+  /**
+   * Is the live config still identical to the applied view? Comparison is
+   * order-insensitive and treats "missing" and "empty" as the same, so cosmetic
+   * differences don't read as unsaved changes.
+   */
+  private viewState(): { name: string; drifted: boolean } {
+    const cfg = this.cfg();
+    const saved = this.activeView ? cfg.views?.[this.activeView] : undefined;
+    if (!saved) return { name: "", drifted: false };
+    const canon = (o: unknown): string => {
+      const norm = (v: unknown): unknown => {
+        if (Array.isArray(v)) return v.map(norm);
+        if (v && typeof v === "object") {
+          const out: Record<string, unknown> = {};
+          for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+            const val = norm((v as Record<string, unknown>)[k]);
+            // undefined / null / [] / "" all mean "not set"
+            if (val === undefined || val === null || val === "") continue;
+            if (Array.isArray(val) && !val.length) continue;
+            out[k] = val;
+          }
+          return out;
+        }
+        return v;
+      };
+      return JSON.stringify(norm(o));
+    };
+    const { views: _a, ...live } = cfg;
+    const { views: _b, ...snap } = saved as FolderConfig;
+    return { name: this.activeView, drifted: canon(live) !== canon(snap) };
+  }
+
   /** Rebuild the toolbar's view dropdown from the saved views. */
   syncViewPicker() {
     const sel = this.viewSelectEl;
     if (!sel) return;
     const views = Object.keys(this.cfg().views ?? {}).sort();
+    const state = this.viewState();
     sel.empty();
-    sel.createEl("option", { value: "", text: views.length ? "— view —" : "— no saved views —" });
-    for (const v of views) sel.createEl("option", { value: v, text: v });
+    // The first entry describes what you're looking at RIGHT NOW: either an
+    // untouched view, that view with unsaved changes, or a setup that isn't a
+    // saved view at all. It is not a "default view" — there is no such thing.
+    if (!state.name)
+      sel.createEl("option", { value: "", text: "Current setup (unsaved)" });
+    else if (state.drifted)
+      sel.createEl("option", { value: "", text: `${state.name} — modified` });
+    else sel.createEl("option", { value: state.name, text: state.name });
+
+    for (const v of views)
+      if (v !== state.name || state.drifted) sel.createEl("option", { value: v, text: v });
+
+    if (state.name && state.drifted) {
+      sel.createEl("option", { value: "__update", text: `⤓ Update "${state.name}"` });
+      sel.createEl("option", { value: "__revert", text: `↩ Revert to "${state.name}"` });
+    }
     sel.createEl("option", { value: "__save", text: "＋ Save current as view…" });
     sel.createEl("option", { value: "__manage", text: "⚙ Manage views…" });
-    sel.value = this.activeView && views.includes(this.activeView) ? this.activeView : "";
+    sel.value = state.name && !state.drifted ? state.name : "";
+    sel.toggleClass("gridsense-view-drift", state.drifted);
+    sel.setAttr(
+      "title",
+      state.name
+        ? state.drifted
+          ? `"${state.name}" with unsaved changes — update it, revert, or save a new view`
+          : `Showing the saved view "${state.name}"`
+        : "This setup isn't saved as a view yet"
+    );
   }
 
   /** Apply a saved view: columns, sort, filters, widths, wrap, formulas. */

@@ -723,3 +723,8 @@ tfoot .gridsense-draft td {
   font-size: var(--font-ui-smaller);
   max-width: 190px;
 }
+
+.gridsense-viewpick.gridsense-view-drift {
+  border-color: var(--color-orange);
+  color: var(--color-orange);
+}
