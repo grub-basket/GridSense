@@ -19,8 +19,24 @@ import { GridStore } from "./store";
 import { EditEngine, normalizeWikiBrackets, parseInput, valueToDisplay } from "./edits";
 import { allHeadings } from "./headings";
 import { HistoryLogModal, appendHistory, filterHistory, readHistory } from "./history-log";
-import { CellRef, ColumnSpec, Condition, FolderConfig, FormulaSpec, Row, colId } from "./types";
+import {
+  CellRef,
+  ColumnFilter,
+  ColumnSpec,
+  Condition,
+  FolderConfig,
+  FormulaSpec,
+  Row,
+  colId,
+} from "./types";
 import { evaluateFormulas, matches } from "./formulas";
+import {
+  ColumnFilterPopover,
+  cellValues,
+  isColFilterActive,
+  makeFilterButton,
+  passesColFilter,
+} from "./column-filter";
 import { ZoomValueModal } from "./zoom";
 import { parseClipboardTable } from "./import";
 import { iconForWidget, widgetForKey } from "./props-editor";
@@ -88,6 +104,9 @@ export class GridView extends ItemView {
    * membership only re-decides when the filter/scope changes or you refresh.
    */
   private stickyRows: Set<string> | null = null;
+  /** Rows surviving everything EXCEPT the per-column filters (dropdown source). */
+  private colFilterBase: Row[] = [];
+  private filterPop: ColumnFilterPopover | null = null;
   /** While a batch write runs the grid is read-only and renders are deferred. */
   private busy = false;
   private busyEl: HTMLElement | null = null;
@@ -253,6 +272,8 @@ export class GridView extends ItemView {
   }
 
   async onClose() {
+    this.filterPop?.close();
+    this.filterPop = null;
     this.store?.detach();
   }
 
@@ -443,6 +464,19 @@ export class GridView extends ItemView {
     const needle = (cfg.filter ?? "").trim().toLowerCase();
     const specs = cfg.formulas ?? [];
     if (specs.length) await evaluateFormulas(this.app, specs, rows);
+    // Excel-style per-column filters. They run after formulas so formula and
+    // heading columns are filterable too, and each column's own filter is
+    // excluded when building its dropdown's value list (Excel semantics).
+    this.colFilterBase = rows;
+    const colFilters = this.activeColFilters();
+    if (colFilters.length) {
+      const keep = this.stickyRows;
+      rows = rows.filter(
+        (r) =>
+          keep?.has(r.file.path) ||
+          colFilters.every(([c, f]) => passesColFilter(cellValues(r, c), f))
+      );
+    }
     if (needle) {
       const keep = this.stickyRows;
       rows = rows.filter((r) => {
@@ -462,7 +496,7 @@ export class GridView extends ItemView {
         return false;
       });
       this.stickyRows = new Set(rows.map((r) => r.file.path));
-    } else if (activeConds.length) {
+    } else if (activeConds.length || colFilters.length) {
       this.stickyRows = new Set(rows.map((r) => r.file.path));
     } else {
       this.stickyRows = null;
@@ -529,6 +563,7 @@ export class GridView extends ItemView {
       this.rowCountEl.toggleClass("gridsense-rowcount-partial", visible !== totalAll);
       const why: string[] = [];
       if (needle) why.push("filter");
+      if (colFilters.length) why.push("column filters");
       if (this.truncated) why.push(`row limit (${limit})`);
       this.rowCountEl.setAttr(
         "title",
@@ -567,6 +602,8 @@ export class GridView extends ItemView {
     }
     const parts = [`${this.cols.length - 1} columns`];
     if (needle) parts.push("filtered");
+    if (colFilters.length)
+      parts.push(`${colFilters.length} column filter${colFilters.length === 1 ? "" : "s"}`);
     this.updateStatus(parts.join(" · "));
     if (!this.pendingWhileEditing) this.pendingEl?.hide();
   }
@@ -644,6 +681,15 @@ export class GridView extends ItemView {
       if (c.kind === "prop" && shown !== c.key) th.setAttr("title", `Property: ${c.key}`);
       if (sort && sort.key === c.key)
         th.createSpan({ cls: "gridsense-sort-ind", text: sort.dir === "asc" ? " ▲" : " ▼" });
+      if (this.cfg().showColumnFilters !== false) {
+        const active = isColFilterActive(this.cfg().colFilters?.[colId(c)]);
+        const btn = makeFilterButton(th, active);
+        btn.addEventListener("mousedown", (e) => e.stopPropagation());
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.openColumnFilter(c, btn);
+        });
+      }
       if (c.kind === "heading" || c.kind === "formula") {
         const x = th.createSpan({ cls: "gridsense-remove-col", text: "×" });
         x.setAttr("title", `Remove ${c.kind} column`);
@@ -1145,6 +1191,22 @@ export class GridView extends ItemView {
       this.saveDebounced();
       void this.render();
     };
+    menu.addItem((i) =>
+      i
+        .setTitle("Filter this column…")
+        .setIcon("filter")
+        .onClick(() => {
+          const th = (e.currentTarget as HTMLElement) ?? (e.target as HTMLElement);
+          this.openColumnFilter(c, th.closest("th") ?? th);
+        })
+    );
+    if (this.cfg().colFilters)
+      menu.addItem((i) =>
+        i
+          .setTitle("Clear all column filters")
+          .setIcon("filter-x")
+          .onClick(() => void this.clearColumnFilters())
+      );
     menu.addItem((i) => i.setTitle("Sort A → Z").setIcon("arrow-down-a-z").onClick(() => setSort("asc")));
     menu.addItem((i) => i.setTitle("Sort Z → A").setIcon("arrow-up-a-z").onClick(() => setSort("desc")));
     if (this.cfg().sort)
@@ -1341,6 +1403,10 @@ export class GridView extends ItemView {
       if (k === "z" && !e.shiftKey) return run(() => void this.undo());
       if (k === "z" && e.shiftKey) return run(() => void this.engine.redo());
       if (k === "y") return run(() => void this.engine.redo());
+      // Mod+Shift+L (Excel's autofilter toggle). The Scope registration below
+      // does NOT fire for Shift+letter combos in practice, so this DOM path is
+      // the real handler, not just a popout fallback — verified live.
+      if (k === "l" && e.shiftKey) return run(() => void this.toggleColumnFilters());
     }
     if (!mod && e.key.length === 1 && this.head) {
       this.beginEdit(this.head.row, this.head.col, e.key);
@@ -1840,6 +1906,143 @@ export class GridView extends ItemView {
     if (hidden) cfg.hidden.push(key);
     await this.plugin.saveSettings();
     await this.render();
+  }
+
+  // --------------------------------------------------- per-column filters
+
+  /**
+   * Column filters currently in force, paired with their column. Filters on
+   * hidden columns are deliberately inert (the column isn't in `this.cols`) —
+   * the config keeps them, so unhiding restores the filter.
+   */
+  private activeColFilters(): [ColumnSpec, ColumnFilter][] {
+    const cfg = this.cfg();
+    if (cfg.showColumnFilters === false) return [];
+    const map = cfg.colFilters ?? {};
+    const out: [ColumnSpec, ColumnFilter][] = [];
+    for (const c of this.cols) {
+      const f = map[colId(c)];
+      if (isColFilterActive(f)) out.push([c, f]);
+    }
+    return out;
+  }
+
+  private openColumnFilter(c: ColumnSpec, anchor: HTMLElement) {
+    this.filterPop?.close();
+    const key = colId(c);
+    // Excel semantics: the value list reflects the other columns' filters but
+    // NOT this one's, so you can always re-check what you just excluded.
+    const others = this.activeColFilters().filter(([o]) => colId(o) !== key);
+    const counts = new Map<string, number>();
+    let blankCount = 0;
+    for (const r of this.colFilterBase) {
+      if (!others.every(([o, f]) => passesColFilter(cellValues(r, o), f))) continue;
+      const vals = cellValues(r, c);
+      if (vals.every((v) => v === "")) {
+        blankCount++;
+        continue;
+      }
+      for (const v of new Set(vals)) if (v !== "") counts.set(v, (counts.get(v) ?? 0) + 1);
+    }
+    const distinct = [...counts.entries()]
+      .map(([text, count]) => ({ text, count }))
+      .sort((a, b) => a.text.localeCompare(b.text, undefined, { numeric: true }));
+    const shown = c.kind === "prop" ? this.cfg().rename?.[c.key] ?? c.key : c.key;
+    const pop = new ColumnFilterPopover({
+      app: this.app,
+      anchor,
+      column: c,
+      label: c.kind === "file" ? "File name" : shown,
+      distinct,
+      blankCount,
+      current: this.cfg().colFilters?.[key],
+      onChange: (f) => this.setColumnFilter(key, f),
+      onSort: (dir) => {
+        this.cfg().sort = { key: c.key, dir };
+        this.resetRowOrder();
+        this.saveDebounced();
+        void this.render();
+      },
+    });
+    this.filterPop = pop;
+    // The dropdown outlives its <th> (every change re-renders the table), so it
+    // closes on grid scroll instead of trailing a destroyed anchor. The
+    // listener targets THIS popover, not whatever is open when it fires.
+    const onScroll = () => {
+      pop.close();
+      if (this.filterPop === pop) this.filterPop = null;
+    };
+    this.scrollerEl?.addEventListener("scroll", onScroll, { once: true });
+  }
+
+  private setColumnFilter(key: string, f: ColumnFilter | undefined) {
+    const cfg = this.cfg();
+    const map = cfg.colFilters ?? {};
+    if (f) map[key] = f;
+    else delete map[key];
+    if (Object.keys(map).length) cfg.colFilters = map;
+    else delete cfg.colFilters;
+    this.stickyRows = null; // a changed filter re-decides membership
+    this.resetRowOrder();
+    this.saveDebounced();
+    this.requestRender();
+  }
+
+  /**
+   * Mod+Shift+L, Excel's autofilter toggle: hides the funnel buttons and drops
+   * every column filter (that clearing is the point of the toggle). Undoable,
+   * so turning it off by accident doesn't cost the filter set.
+   */
+  async toggleColumnFilters() {
+    const cfg = this.cfg();
+    const on = cfg.showColumnFilters !== false;
+    const saved = cfg.colFilters ? JSON.parse(JSON.stringify(cfg.colFilters)) : undefined;
+    const set = async (show: boolean, filters: Record<string, ColumnFilter> | undefined) => {
+      const c = this.cfg();
+      if (show) delete c.showColumnFilters;
+      else c.showColumnFilters = false;
+      if (filters) c.colFilters = filters;
+      else delete c.colFilters;
+      this.filterPop?.close();
+      this.stickyRows = null;
+      this.resetRowOrder();
+      await this.plugin.saveSettings();
+      await this.render();
+    };
+    await set(!on, on ? undefined : saved);
+    const cleared = on && saved && Object.keys(saved).length;
+    this.engine.pushUi(
+      on ? "hide column filters" : "show column filters",
+      () => set(on, saved),
+      () => set(!on, on ? undefined : saved)
+    );
+    new Notice(
+      on
+        ? `GridSense: column filters off${cleared ? " — filters cleared, ⌘Z to undo" : ""}`
+        : "GridSense: column filters on"
+    );
+  }
+
+  /** Drop every per-column filter but keep the buttons. */
+  async clearColumnFilters() {
+    const cfg = this.cfg();
+    if (!cfg.colFilters) {
+      new Notice("GridSense: no column filters set");
+      return;
+    }
+    const saved = JSON.parse(JSON.stringify(cfg.colFilters)) as Record<string, ColumnFilter>;
+    const set = async (filters: Record<string, ColumnFilter> | undefined) => {
+      const c = this.cfg();
+      if (filters) c.colFilters = filters;
+      else delete c.colFilters;
+      this.stickyRows = null;
+      this.resetRowOrder();
+      await this.plugin.saveSettings();
+      await this.render();
+    };
+    await set(undefined);
+    this.engine.pushUi("clear column filters", () => set(saved), () => set(undefined));
+    new Notice("GridSense: cleared column filters — ⌘Z to undo");
   }
 
   async hideColumn(key: string) {

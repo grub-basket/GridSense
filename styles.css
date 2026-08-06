@@ -757,3 +757,115 @@ tfoot .gridsense-draft td {
 .gridsense-section-body {
   padding-left: 4px;
 }
+
+/* ---------------------------------------------- per-column filter (Excel) */
+.gridsense-filter-btn {
+  margin-left: 4px;
+  color: var(--text-faint);
+  cursor: pointer;
+  display: inline-flex;
+  vertical-align: middle;
+}
+.gridsense-filter-btn .svg-icon {
+  width: 13px;
+  height: 13px;
+}
+.gridsense-filter-btn:hover {
+  color: var(--text-normal);
+}
+.gridsense-filter-btn.is-active {
+  color: var(--text-accent);
+}
+
+.gridsense-colfilter {
+  position: fixed;
+  z-index: var(--layer-menu);
+  width: 260px;
+  max-height: 420px;
+  display: flex;
+  flex-direction: column;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  box-shadow: var(--shadow-s);
+  padding: 6px;
+  font-size: var(--font-ui-small);
+}
+.gridsense-colfilter-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 2px 6px;
+}
+.gridsense-colfilter-title {
+  font-weight: var(--font-semibold);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.gridsense-colfilter-clear {
+  color: var(--text-accent);
+  cursor: pointer;
+}
+.gridsense-colfilter-sort {
+  display: flex;
+  gap: 4px;
+  padding-bottom: 6px;
+}
+.gridsense-colfilter-sort button {
+  flex: 1;
+  padding: 2px 4px;
+  font-size: var(--font-ui-smaller);
+}
+.gridsense-colfilter-search input,
+.gridsense-colfilter-cond input {
+  width: 100%;
+}
+.gridsense-colfilter-list {
+  flex: 1;
+  overflow-y: auto;
+  margin: 6px 0;
+  border-top: 1px solid var(--background-modifier-border);
+  border-bottom: 1px solid var(--background-modifier-border);
+  padding: 4px 0;
+}
+.gridsense-colfilter-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  cursor: pointer;
+  border-radius: var(--radius-s);
+}
+.gridsense-colfilter-item:hover {
+  background: var(--background-modifier-hover);
+}
+.gridsense-colfilter-item.is-all {
+  font-weight: var(--font-semibold);
+}
+.gridsense-colfilter-item input {
+  margin: 0;
+}
+.gridsense-colfilter-val {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gridsense-colfilter-count {
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.gridsense-colfilter-empty {
+  color: var(--text-faint);
+  padding: 4px;
+}
+.gridsense-colfilter-cond {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.gridsense-colfilter-cond .is-hidden {
+  display: none;
+}

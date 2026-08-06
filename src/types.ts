@@ -93,6 +93,20 @@ export interface FormulaSpec {
   countDir?: string;
 }
 
+/**
+ * One column's filter, Excel-style: a set of allowed values, optionally plus a
+ * condition. An absent `values` means "all values pass" — so a filter that only
+ * carries a condition doesn't have to enumerate the column.
+ */
+export interface ColumnFilter {
+  /** Allowed display values. Absent = no value restriction. */
+  values?: string[];
+  /** Let empty cells through (tracked separately from `values`). */
+  blanks?: boolean;
+  /** Extra condition applied on top of the value selection. */
+  cond?: { op: Condition["op"]; value: string };
+}
+
 export interface FolderConfig {
   /** Extra heading-content columns for this folder scope. */
   headingColumns: string[];
@@ -103,6 +117,10 @@ export interface FolderConfig {
   filter?: string;
   /** Stacked per-property conditions (Bases-style), applied before the quick filter. */
   filters?: { conjunction: "and" | "or"; conditions: Condition[] };
+  /** Excel-style per-column filters, keyed by property name. */
+  colFilters?: Record<string, ColumnFilter>;
+  /** Whether the per-column filter buttons are shown (Mod+Shift+L). */
+  showColumnFilters?: boolean;
   /** Per-column widths in px (keyed by colId). */
   widths?: Record<string, number>;
   wrap?: boolean;

@@ -74,6 +74,12 @@ export default class GridSensePlugin extends Plugin {
     gridCmd("grid-add-column", "Grid: add column…", (v) => v.commandAddColumn());
     gridCmd("grid-columns", "Grid: columns & views…", (v) => v.commandColumns());
     gridCmd("grid-filters", "Grid: filters…", (v) => v.commandFilters());
+    gridCmd("grid-toggle-column-filters", "Grid: toggle column filter buttons", (v) =>
+      void v.toggleColumnFilters()
+    );
+    gridCmd("grid-clear-column-filters", "Grid: clear all column filters", (v) =>
+      void v.clearColumnFilters()
+    );
     gridCmd("grid-jump-column", "Grid: jump to column…", (v) => v.commandJumpToColumn());
     gridCmd("grid-history", "Grid: edit history…", (v) => void v.commandHistory());
     gridCmd("grid-recompile", "Grid: recompile from notes", (v) => v.commandRecompile());

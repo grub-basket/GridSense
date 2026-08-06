@@ -44,12 +44,21 @@ export function matches(row: Row, c: Condition): boolean {
     (Array.isArray(raw) && raw.length === 0);
   if (c.op === "empty") return empty;
   if (c.op === "not-empty") return !empty;
-  const left = valueToDisplay(raw);
-  const right = c.value ?? "";
+  return matchesText(valueToDisplay(raw), c.op, c.value ?? "");
+}
+
+/**
+ * The scalar half of `matches`: compare one display string against an operator
+ * and operand. Numeric when both sides parse as numbers, case-insensitive
+ * otherwise. Shared with the per-column filters, which work on cell text rather
+ * than raw frontmatter. `empty`/`not-empty` are the caller's job — emptiness
+ * depends on the source shape (an empty array isn't an empty string).
+ */
+export function matchesText(left: string, op: Condition["op"], right: string): boolean {
   const ln = Number(left);
   const rn = Number(right);
   const numeric = left !== "" && right !== "" && !Number.isNaN(ln) && !Number.isNaN(rn);
-  switch (c.op) {
+  switch (op) {
     case "=":
       return numeric ? ln === rn : left.toLowerCase() === right.toLowerCase();
     case "!=":
