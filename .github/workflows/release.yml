@@ -21,10 +21,14 @@ jobs:
         id: version
         run: echo "version=$(jq -r .version manifest.json)" >> "$GITHUB_OUTPUT"
 
-      - name: Check if tag already exists
+      # Gate on the RELEASE, not the tag: a tag pushed by hand used to make every
+      # later step skip, so the run went green while publishing nothing.
+      - name: Check if the release already exists
         id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if git rev-parse "${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+          if gh release view "${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
@@ -60,8 +64,8 @@ jobs:
         env:
           TAG: ${{ steps.version.outputs.version }}
         run: |
-          git tag "$TAG"
-          git push origin "$TAG"
+          git rev-parse "$TAG" >/dev/null 2>&1 || git tag "$TAG"
+          git push origin "$TAG" || true
 
       - name: Create release and upload plugin assets
         if: steps.check.outputs.exists == 'false'
