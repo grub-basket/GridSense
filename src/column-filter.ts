@@ -1,4 +1,4 @@
-import { App, setIcon } from "obsidian";
+import { App, prepareFuzzySearch, setIcon } from "obsidian";
 import { ColumnFilter, ColumnSpec, Condition, Row, SortDir, colId } from "./types";
 import { valueToDisplay } from "./edits";
 import { matchesText } from "./formulas";
@@ -93,6 +93,8 @@ export class ColumnFilterPopover {
   private win: Window;
   private filter: ColumnFilter;
   private search = "";
+  /** Fuzzy matcher for the current query, rebuilt on each keystroke. */
+  private matcher: ((text: string) => { score: number } | null) | null = null;
   private listEl!: HTMLElement;
   private cleanup: (() => void)[] = [];
 
@@ -184,7 +186,10 @@ export class ColumnFilterPopover {
       attr: { placeholder: "Search values…" },
     });
     search.addEventListener("input", () => {
-      this.search = search.value.trim().toLowerCase();
+      this.search = search.value.trim();
+      // Obsidian's own fuzzy scorer, so "dft" finds "draft" and the closest
+      // matches float to the top — same feel as the quick switcher.
+      this.matcher = this.search ? prepareFuzzySearch(this.search) : null;
       this.renderList();
     });
     search.addEventListener("keydown", (e) => e.stopPropagation());
@@ -220,9 +225,18 @@ export class ColumnFilterPopover {
   private renderList() {
     const list = this.listEl;
     list.empty();
-    const shown = this.o.distinct.filter(
-      (d) => !this.search || d.text.toLowerCase().includes(this.search)
-    );
+    // Fuzzy when searching: score every value, drop the misses, best first.
+    // Ties keep the underlying alphabetical order.
+    const match = this.matcher;
+    const shown = match
+      ? this.o.distinct
+          .map((d) => ({ d, score: match(d.text)?.score }))
+          .filter((x): x is { d: { text: string; count: number }; score: number } =>
+            x.score !== undefined
+          )
+          .sort((a, b) => b.score - a.score)
+          .map((x) => x.d)
+      : this.o.distinct;
     const selected = this.filter.values ? new Set(this.filter.values) : null;
     const isOn = (text: string) => !selected || selected.has(text);
 
