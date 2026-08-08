@@ -869,3 +869,33 @@ tfoot .gridsense-draft td {
 .gridsense-colfilter-cond .is-hidden {
   display: none;
 }
+
+/* ------------------------------------------------------------- add row form */
+.gridsense-addrow-path {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  padding: 0 0 8px;
+  word-break: break-all;
+}
+.gridsense-addrow-path.is-error {
+  color: var(--text-error);
+}
+.gridsense-addrow h4 {
+  margin: 4px 0 0;
+}
+/* A 20-column grid means 20 fields: scroll them, keep name + buttons in view. */
+.gridsense-addrow-fields {
+  max-height: 45vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.gridsense-addrow-fields .setting-item {
+  padding: 6px 0;
+  border-top: none;
+}
+.gridsense-addrow-fields .setting-item-info {
+  margin-right: 8px;
+}
+.gridsense-addrow-fields .setting-item-control input[type="text"] {
+  width: 100%;
+}

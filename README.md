@@ -8,6 +8,7 @@ Excel-grade grid over your Obsidian notes' frontmatter — a standalone alternat
 - **Real multi-cell selection** — click-drag, Shift+click, Shift+arrows, click a header to select a column.
 - **Excel keys** — arrows/Tab/Enter navigation, type-to-edit, F2/Enter to edit, Esc, ⌘D fill down, ⌘R fill right, ⌘C/⌘V TSV copy-paste (works with real spreadsheets), Delete clears, ⌘Z undo.
 - **Per-column filters** — a funnel button on every column header opens an Excel-style dropdown: fuzzy-search the values, tick the ones you want, filter blanks, sort, or add a condition (contains / is / > / is empty …). ⌘⇧L turns the buttons off and clears the filters; ⌘Z brings them back.
+- **Add row form** — the `＋ row` toolbar button (or *Grid: add row…*) opens a stacked form with a field per property, value autocomplete from what the column already contains, a live path preview that warns before a name collision, and *Create & add another* for typing several rows in a row. One ⌘Z removes the whole note again. The inline draft rows at the top and bottom of the grid still work for quick entry.
 - **Find & replace in selection** (⌘F) — or the whole grid when nothing is selected.
 - **Heading-content columns** — add a read-only column showing each note's body text under a chosen heading (for the stuff you keep outside frontmatter).
 - **Compiled database** — the grid is rendered from a compiled snapshot of your frontmatter, persisted as JSON under `.obsidian/plugins/gridsense/db/`, auto-invalidated by metadata-cache events.

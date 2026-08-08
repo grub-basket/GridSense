@@ -21,6 +21,7 @@ import { allHeadings } from "./headings";
 import { HistoryLogModal, appendHistory, filterHistory, readHistory } from "./history-log";
 import {
   CellRef,
+  ChangeRecord,
   ColumnFilter,
   ColumnSpec,
   Condition,
@@ -38,6 +39,7 @@ import {
   passesColFilter,
 } from "./column-filter";
 import { ZoomValueModal } from "./zoom";
+import { AddRowModal } from "./add-row";
 import { parseClipboardTable } from "./import";
 import { iconForWidget, widgetForKey } from "./props-editor";
 import { TOOLBOX_TOOLS, addToolboxMenu, toolboxInstalled } from "./toolbox";
@@ -303,6 +305,9 @@ export class GridView extends ItemView {
     });
     mkBtn("▦ columns", "Views, show/hide columns, heading & formula columns", () =>
       this.openColumnsModal()
+    );
+    mkBtn("＋ row", "Add a row — fill the note name and its properties in one form", () =>
+      this.openAddRow()
     );
     mkBtn("⇥ column", "Jump to a column (⌘/Ctrl+G)", () => new JumpToColumnModal(this).open());
     mkBtn("⛃ filters", "Stack property conditions (like Bases filters)", () =>
@@ -845,35 +850,143 @@ export class GridView extends ItemView {
 
   private async commitDraft(which: "top" | "bottom") {
     const state = this.drafts[which];
-    const name = (state["file"] ?? "").trim().replace(/[\\/:]+/g, "-");
+    const { file, ...values } = { ...state, file: state["file"] ?? "" };
+    const created = await this.createRow(file, values, which);
+    if (!created) return;
+    this.drafts[which] = {};
+    this.editing = false;
+    this.draftFocusPending = which;
+    this.requestRender();
+  }
+
+  /**
+   * Create one note from a name + property values. Shared by the inline draft
+   * row and the Add row modal, so both get the same collision checks and the
+   * same SINGLE undo entry: ⌘Z moves the new note to the GridSense trash rather
+   * than leaving a half-undone note with its values stripped.
+   */
+  async createRow(
+    rawName: string,
+    values: Record<string, string>,
+    which: "top" | "bottom" = "bottom"
+  ): Promise<TFile | null> {
+    const name = (rawName ?? "").trim().replace(/[\\/:]+/g, "-");
     if (!name) {
-      new Notice("GridSense: give the draft a note name (first column) to create it");
-      return;
+      new Notice("GridSense: give the row a note name to create it");
+      return null;
     }
-    const path = `${this.folder ? this.folder + "/" : ""}${name}.md`;
+    const folder = this.scopeFolder();
+    const path = `${folder ? folder + "/" : ""}${name}.md`;
     if (this.app.vault.getAbstractFileByPath(path)) {
       new Notice("GridSense: a note with that name already exists here");
-      return;
+      return null;
     }
     let file: TFile;
     try {
       file = await this.app.vault.create(path, "---\n---\n");
     } catch (err) {
       new Notice(`GridSense: could not create note: ${String(err)}`);
-      return;
+      return null;
     }
-    const writes: { file: TFile; key: string; value: unknown }[] = [];
-    for (const [key, text] of Object.entries(state)) {
-      if (key === "file" || !text.trim()) continue;
-      writes.push({ file, key, value: parseInput(text, undefined) });
+    // Written directly rather than through the edit engine: the creation is the
+    // undoable unit, so the values must not land as a second stack entry.
+    const changes: ChangeRecord[] = [];
+    const entries = Object.entries(values).filter(([k, v]) => k !== "file" && (v ?? "").trim());
+    if (entries.length) {
+      try {
+        await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+          for (const [key, text] of entries) {
+            const parsed = parseInput(text, undefined);
+            fm[key] = parsed;
+            changes.push({ path: file.path, key, before: undefined, after: parsed });
+          }
+        });
+      } catch (err) {
+        new Notice(`GridSense: created "${name}" but could not write its properties: ${String(err)}`);
+      }
     }
-    if (writes.length) await this.engine.apply(`create ${name}`, writes);
+    void appendHistory(this.app, this.folder, {
+      label: `add row "${name}"`,
+      when: Date.now(),
+      changes,
+    });
     this.pinnedNew.set(path, which);
-    this.drafts[which] = {};
-    this.editing = false;
-    this.draftFocusPending = which;
-    new Notice(`GridSense: created "${name}"`);
+    const created = file;
+    // Undo/redo hand the note between the grid and the GridSense trash. The
+    // trashed path is remembered rather than re-derived: the trash renames on
+    // collision ("name (2).md"), so a basename search could redo the wrong note
+    // — or none at all.
+    let trashedPath: string | null = null;
+    this.engine.pushUi(
+      `add row "${name}"`,
+      async () => {
+        const live = this.app.vault.getAbstractFileByPath(created.path);
+        if (!(live instanceof TFile)) return;
+        const res = await this.plugin.trash?.trash(live);
+        if (!res) {
+          new Notice(`GridSense: could not undo "${name}" — the note is still in the grid`);
+          return;
+        }
+        trashedPath = res.to;
+        this.pinnedNew.delete(path);
+        this.requestRender();
+      },
+      async () => {
+        const back = trashedPath ? this.app.vault.getAbstractFileByPath(trashedPath) : null;
+        if (!(back instanceof TFile)) {
+          new Notice(`GridSense: "${name}" is no longer in the trash — can't redo`);
+          return;
+        }
+        await this.app.vault.rename(back, path);
+        trashedPath = null;
+        this.pinnedNew.set(path, which);
+        this.requestRender();
+      }
+    );
+    new Notice(`GridSense: created "${name}" — ⌘Z to undo`);
     this.requestRender();
+    return file;
+  }
+
+  /** Values of the currently selected row, for seeding the Add row modal. */
+  private selectedRowValues(): Record<string, string> | undefined {
+    const idx = this.head?.row;
+    if (idx === undefined) return undefined;
+    const row = this.viewRows[idx];
+    if (!row) return undefined;
+    const out: Record<string, string> = {};
+    for (const c of this.cols)
+      if (c.kind === "prop") {
+        const v = valueToDisplay(row.fm[c.key]);
+        if (v) out[c.key] = v;
+      }
+    return out;
+  }
+
+  /** Property columns currently shown, as key + display name. Used by Add row. */
+  propColumnFields(): { key: string; label: string }[] {
+    return this.cols
+      .filter((c) => c.kind === "prop")
+      .map((c) => ({ key: c.key, label: this.cfg().rename?.[c.key] ?? c.key }));
+  }
+
+  /** Distinct values already used in a property, for value autocomplete. */
+  distinctValues(key: string): string[] {
+    const seen = new Set<string>();
+    for (const r of this.store?.rows ?? []) {
+      const raw = r.fm[key];
+      if (raw === undefined || raw === null) continue;
+      for (const v of Array.isArray(raw) ? raw : [raw]) {
+        const text = valueToDisplay(v).trim();
+        if (text) seen.add(text);
+      }
+    }
+    return [...seen].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  }
+
+  /** Open the Add row form. Seeded from the selected row when there is one. */
+  openAddRow(seedFromSelection = false) {
+    new AddRowModal(this, seedFromSelection ? this.selectedRowValues() : undefined).open();
   }
 
   /** Sticky footer: the bottom draft row plus Σ/avg per column. */

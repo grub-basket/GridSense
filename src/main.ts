@@ -71,6 +71,10 @@ export default class GridSensePlugin extends Plugin {
     gridCmd("grid-undo", "Grid: undo", (v) => v.commandUndo());
     gridCmd("grid-redo", "Grid: redo", (v) => v.commandRedo());
     gridCmd("grid-toggle-wrap", "Grid: toggle word wrap", (v) => v.commandToggleWrap());
+    gridCmd("grid-add-row", "Grid: add row…", (v) => v.openAddRow());
+    gridCmd("grid-add-row-from-selection", "Grid: add row from the selected row…", (v) =>
+      v.openAddRow(true)
+    );
     gridCmd("grid-add-column", "Grid: add column…", (v) => v.commandAddColumn());
     gridCmd("grid-columns", "Grid: columns & views…", (v) => v.commandColumns());
     gridCmd("grid-filters", "Grid: filters…", (v) => v.commandFilters());
