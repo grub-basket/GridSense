@@ -1,4 +1,4 @@
-import { Modal, Notice, Setting, TFile } from "obsidian";
+import { Modal, Notice, TFile } from "obsidian";
 import type { GridView } from "./grid-view";
 import { ListSuggest } from "./formula-builder";
 
@@ -24,83 +24,87 @@ export class AddRowModal extends Modal {
     if (seed) this.values = { ...seed };
   }
 
+  /** One label + control pair in the form grid. */
+  private field(grid: HTMLElement, label: string): HTMLInputElement {
+    grid.createDiv({ cls: "gridsense-addrow-label", text: label });
+    const cell = grid.createDiv({ cls: "gridsense-addrow-control" });
+    return cell.createEl("input", { type: "text" });
+  }
+
   onOpen() {
     const { contentEl } = this;
     this.titleEl.setText("Add row");
     contentEl.addClass("gridsense-addrow");
 
-    new Setting(contentEl)
-      .setName("Note name")
-      .setDesc("The file this row becomes. Required.")
-      .addText((t) => {
-        this.nameInput = t.inputEl;
-        t.setPlaceholder("new note name…").onChange((v) => {
-          this.name = v;
-          this.syncPath();
+    // Laid out as a single two-column grid rather than Obsidian Setting rows:
+    // every label starts at the same x and every input is the same width, which
+    // Setting can't promise (its label column sizes to the text).
+    const grid = contentEl.createDiv({ cls: "gridsense-addrow-grid" });
+    this.nameInput = this.field(grid, "Note name");
+    this.nameInput.placeholder = "new note name…";
+    this.nameInput.addEventListener("input", () => {
+      this.name = this.nameInput.value;
+      this.syncPath();
+    });
+    this.nameInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        void this.submit(false);
+      }
+    });
+    this.pathEl = grid.createDiv({ cls: "gridsense-addrow-path" });
+    this.syncPath();
+
+    const fields = this.view.propColumnFields();
+    if (fields.length) {
+      grid.createDiv({ cls: "gridsense-addrow-section", text: "Properties" });
+      const scroller = grid.createDiv({ cls: "gridsense-addrow-fields" });
+      const inner = scroller.createDiv({ cls: "gridsense-addrow-grid" });
+      for (const { key, label } of fields) {
+        const input = this.field(inner, label);
+        input.value = this.values[key] ?? "";
+        input.placeholder = "leave empty to skip";
+        input.addEventListener("input", () => {
+          this.values[key] = input.value;
         });
-        t.inputEl.addEventListener("keydown", (e) => {
+        new ListSuggest(this.app, input, () => this.view.distinctValues(key));
+        input.addEventListener("keydown", (e) => {
           if (e.key === "Enter") {
             e.preventDefault();
             void this.submit(false);
           }
         });
-      });
-    this.pathEl = contentEl.createDiv({ cls: "gridsense-addrow-path" });
-    this.syncPath();
-
-    const fields = this.view.propColumnFields();
-    if (fields.length) {
-      contentEl.createEl("h4", { text: "Properties" });
-      const wrap = contentEl.createDiv({ cls: "gridsense-addrow-fields" });
-      for (const { key, label } of fields) {
-        new Setting(wrap).setName(label).addText((t) => {
-          t.setValue(this.values[key] ?? "")
-            .setPlaceholder("leave empty to skip")
-            .onChange((v) => {
-              this.values[key] = v;
-            });
-          new ListSuggest(this.app, t.inputEl, () => this.view.distinctValues(key));
-          t.inputEl.addEventListener("keydown", (e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              void this.submit(false);
-            }
-          });
-        });
       }
     } else {
-      contentEl.createDiv({
+      grid.createDiv({
         cls: "gridsense-addrow-path",
         text: "This grid has no property columns yet — the note is created empty, and you can add columns after.",
       });
     }
 
-    new Setting(contentEl)
-      .setName("Position")
-      .setDesc("Where the new row is pinned until the next recompile.")
-      .addDropdown((d) =>
-        d
-          .addOptions({ bottom: "Bottom of the grid", top: "Top of the grid" })
-          .setValue(this.where)
-          .onChange((v) => {
-            this.where = v as "top" | "bottom";
-          })
-      );
+    grid.createDiv({ cls: "gridsense-addrow-label", text: "Position" });
+    const posCell = grid.createDiv({ cls: "gridsense-addrow-control" });
+    const pos = posCell.createEl("select", { cls: "dropdown" });
+    pos.createEl("option", { value: "bottom", text: "Bottom of the grid" });
+    pos.createEl("option", { value: "top", text: "Top of the grid" });
+    pos.value = this.where;
+    pos.addEventListener("change", () => {
+      this.where = pos.value as "top" | "bottom";
+    });
 
-    new Setting(contentEl)
-      .addButton((b) =>
-        b
-          .setButtonText("Create")
-          .setCta()
-          .onClick(() => void this.submit(false))
-      )
-      .addButton((b) =>
-        b
-          .setButtonText("Create & add another")
-          .setTooltip("Keeps the property values, clears the name — for typing several rows in a row")
-          .onClick(() => void this.submit(true))
-      )
-      .addButton((b) => b.setButtonText("Cancel").onClick(() => this.close()));
+    const buttons = contentEl.createDiv({ cls: "gridsense-addrow-buttons" });
+    const mk = (text: string, title: string, fn: () => void, cta = false) => {
+      const b = buttons.createEl("button", { text, attr: { title } });
+      if (cta) b.addClass("mod-cta");
+      b.addEventListener("click", fn);
+    };
+    mk("Create", "Create the note and close", () => void this.submit(false), true);
+    mk(
+      "Create & add another",
+      "Keeps the property values, clears the name — for typing several rows in a row",
+      () => void this.submit(true)
+    );
+    mk("Cancel", "Close without creating anything", () => this.close());
 
     window.setTimeout(() => this.nameInput?.focus(), 0);
   }
