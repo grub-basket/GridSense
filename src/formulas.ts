@@ -1,6 +1,7 @@
 import { App, TFile, TFolder } from "obsidian";
 import { Condition, FormulaSpec, Row } from "./types";
 import { extractHeadingSection } from "./headings";
+import { daysAgo, isMetaDate, metaDisplay, metaRaw, parseDateOperand } from "./file-meta";
 import { valueToDisplay } from "./edits";
 
 function filesInDir(app: App, dirPath: string): TFile[] {
@@ -37,9 +38,32 @@ function buildIndex(app: App, spec: FormulaSpec): FormulaIndex {
   return { byValue };
 }
 
+/**
+ * Resolve a condition's left-hand side. `file.<key>` reads file metadata
+ * (modified/created/size/extension/folder/name/path); anything else is a
+ * frontmatter property.
+ */
+function conditionOperand(row: Row, prop: string): { raw: unknown; stamp: number | null } {
+  if (!prop.startsWith("file.")) return { raw: row.fm[prop], stamp: null };
+  const key = prop.slice(5);
+  if (key === "name") return { raw: row.file.basename, stamp: null };
+  if (key === "path") return { raw: row.file.path, stamp: null };
+  const value = metaRaw(row.file, key);
+  return { raw: isMetaDate(key) ? metaDisplay(row.file, key) : value,
+    stamp: isMetaDate(key) ? (value as number) : null };
+}
+
 /** Compare one row's property against a condition. */
 export function matches(row: Row, c: Condition): boolean {
-  const raw = row.fm[c.prop];
+  const operand = conditionOperand(row, c.prop);
+  if (c.op === "last-days" || c.op === "after" || c.op === "before") {
+    // File timestamps first; failing that, a frontmatter value that parses as a
+    // date (so `due before 2026-09-01` works, not just `file.mtime`).
+    const stamp = operand.stamp ?? parseDateOperand(valueToDisplay(operand.raw));
+    if (stamp === null) return false;
+    return matchesDate(stamp, c.op, c.value ?? "");
+  }
+  const raw = operand.raw;
   const empty = raw === undefined || raw === null || raw === "" ||
     (Array.isArray(raw) && raw.length === 0);
   if (c.op === "empty") return empty;
@@ -54,6 +78,24 @@ export function matches(row: Row, c: Condition): boolean {
  * than raw frontmatter. `empty`/`not-empty` are the caller's job — emptiness
  * depends on the source shape (an empty array isn't an empty string).
  */
+/**
+ * Date comparison for the temporal operators. "in the last N days" counts from
+ * local midnight N days back, so it means whole days rather than a rolling
+ * N×24h window that drifts through the day.
+ */
+export function matchesDate(stamp: number, op: Condition["op"], value: string): boolean {
+  if (op === "last-days") {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 0) return false;
+    return stamp >= daysAgo(n);
+  }
+  const at = parseDateOperand(value);
+  if (at === null) return false;
+  // "before 2026-08-01" means strictly before that day starts; "after" means
+  // from the END of that day, so neither silently includes the boundary day.
+  return op === "after" ? stamp >= at + 86400000 : stamp < at;
+}
+
 export function matchesText(left: string, op: Condition["op"], right: string): boolean {
   const ln = Number(left);
   const rn = Number(right);

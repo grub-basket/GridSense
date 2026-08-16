@@ -1,7 +1,8 @@
 import { App, prepareFuzzySearch, setIcon } from "obsidian";
 import { ColumnFilter, ColumnSpec, Condition, Row, SortDir, colId } from "./types";
 import { valueToDisplay } from "./edits";
-import { matchesText } from "./formulas";
+import { matchesDate, matchesText } from "./formulas";
+import { isMetaDate, metaDisplay, metaRaw, parseDateOperand } from "./file-meta";
 
 /**
  * Excel-style per-column filtering: the value extraction, the predicate, and
@@ -15,6 +16,10 @@ import { matchesText } from "./formulas";
  */
 export function cellValues(row: Row, c: ColumnSpec): string[] {
   if (c.kind === "file") return [row.file.basename];
+  if (c.kind === "meta")
+    // Dates group by day: a checkbox list of distinct minutes would have one
+    // entry per row and tell you nothing.
+    return [isMetaDate(c.key) ? metaDisplay(row.file, c.key).slice(0, 10) : metaDisplay(row.file, c.key)];
   if (c.kind === "heading") return [(row.headings[c.key] ?? "").trim()];
   if (c.kind === "formula") return [(row.formulas?.[c.key] ?? "").trim()];
   const raw = row.fm[c.key];
@@ -35,8 +40,24 @@ export function isColFilterActive(f: ColumnFilter | undefined): boolean {
   return c.op === "empty" || c.op === "not-empty" || (c.value ?? "") !== "";
 }
 
+/**
+ * The timestamp behind a cell, when there is one. Date conditions compare
+ * against this rather than the rendered text.
+ */
+export function cellStamp(row: Row, c: ColumnSpec): number | null {
+  if (c.kind === "meta" && isMetaDate(c.key)) return metaRaw(row.file, c.key) as number;
+  // Not file metadata, but the cell may still hold a date: a `due` or `created`
+  // frontmatter value should answer "in the last 30 days" too.
+  const text = cellValues(row, c)[0] ?? "";
+  return text ? parseDateOperand(text) : null;
+}
+
 /** Does one row's column pass this filter? */
-export function passesColFilter(values: string[], f: ColumnFilter): boolean {
+export function passesColFilter(
+  values: string[],
+  f: ColumnFilter,
+  stamp: number | null = null
+): boolean {
   const empty = values.every((v) => v === "");
   if (f.values) {
     const allowed = new Set(f.values);
@@ -50,11 +71,23 @@ export function passesColFilter(values: string[], f: ColumnFilter): boolean {
   if (c && (c.op === "empty" || c.op === "not-empty" || (c.value ?? "") !== "")) {
     if (c.op === "empty") return empty;
     if (c.op === "not-empty") return !empty;
+    if (c.op === "last-days" || c.op === "after" || c.op === "before") {
+      // A date condition on a column with no timestamp keeps nothing, rather
+      // than silently degrading to a string comparison.
+      if (stamp === null) return false;
+      return matchesDate(stamp, c.op, c.value ?? "");
+    }
     // Any element satisfying the condition keeps the row (list semantics).
     if (!values.some((v) => matchesText(v, c.op, c.value ?? ""))) return false;
   }
   return true;
 }
+
+const DATE_OPS: { id: Condition["op"]; label: string; placeholder: string }[] = [
+  { id: "last-days", label: "in the last … days", placeholder: "30" },
+  { id: "after", label: "after", placeholder: "2026-08-01" },
+  { id: "before", label: "before", placeholder: "2026-08-01" },
+];
 
 const OPS: { id: Condition["op"]; label: string }[] = [
   { id: "contains", label: "contains" },
@@ -200,6 +233,10 @@ export class ColumnFilterPopover {
     const condRow = this.el.createDiv({ cls: "gridsense-colfilter-cond" });
     const sel = condRow.createEl("select");
     sel.createEl("option", { value: "", text: "— condition —" });
+    const dates = isMetaDate(this.o.column.kind === "meta" ? this.o.column.key : "");
+    // Date columns lead with the temporal operators — "in the last 30 days" is
+    // the whole point of them — and keep the generic ones underneath.
+    if (dates) for (const op of DATE_OPS) sel.createEl("option", { value: op.id, text: op.label });
     for (const op of OPS) sel.createEl("option", { value: op.id, text: op.label });
     sel.value = this.filter.cond?.op ?? "";
     const val = condRow.createEl("input", {
@@ -210,6 +247,8 @@ export class ColumnFilterPopover {
     const syncCond = () => {
       const op = sel.value as Condition["op"] | "";
       val.toggleClass("is-hidden", op === "" || op === "empty" || op === "not-empty");
+      const dateOp = DATE_OPS.find((d) => d.id === op);
+      val.placeholder = dateOp ? dateOp.placeholder : "value";
       if (!op) delete this.filter.cond;
       else this.filter.cond = { op, value: val.value };
       this.emit();

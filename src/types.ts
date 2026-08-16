@@ -12,7 +12,7 @@ export interface Row {
   formulas?: Record<string, string>;
 }
 
-export type ColumnKind = "file" | "prop" | "heading" | "formula";
+export type ColumnKind = "file" | "meta" | "prop" | "heading" | "formula";
 
 export interface ColumnSpec {
   kind: ColumnKind;
@@ -57,7 +57,21 @@ export type FormulaType =
 export interface Condition {
   /** Property on the row being evaluated. */
   prop: string;
-  op: "=" | "!=" | ">" | "<" | ">=" | "<=" | "contains" | "empty" | "not-empty";
+  op:
+    | "="
+    | "!="
+    | ">"
+    | "<"
+    | ">="
+    | "<="
+    | "contains"
+    | "empty"
+    | "not-empty"
+    /** Date-only, evaluated against file timestamps: value is a day count. */
+    | "last-days"
+    /** Date-only: value is YYYY-MM-DD (or anything Date can parse). */
+    | "after"
+    | "before";
   value: string;
   /** Result for IFS (ignored by other formula types). */
   then?: string;
@@ -117,6 +131,8 @@ export interface FolderConfig {
   filter?: string;
   /** Stacked per-property conditions (Bases-style), applied before the quick filter. */
   filters?: { conjunction: "and" | "or"; conditions: Condition[] };
+  /** Built-in file-metadata columns shown (mtime/ctime/size/ext/folder). */
+  metaColumns?: string[];
   /** Excel-style per-column filters, keyed by property name. */
   colFilters?: Record<string, ColumnFilter>;
   /** Whether the per-column filter buttons are shown (Mod+Shift+L). */

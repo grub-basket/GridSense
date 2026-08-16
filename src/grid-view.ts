@@ -33,6 +33,7 @@ import {
 import { evaluateFormulas, matches } from "./formulas";
 import {
   ColumnFilterPopover,
+  cellStamp,
   cellValues,
   isColFilterActive,
   makeFilterButton,
@@ -40,6 +41,7 @@ import {
 } from "./column-filter";
 import { ZoomValueModal } from "./zoom";
 import { AddRowModal } from "./add-row";
+import { META_COLUMNS, isMetaDate, metaColumn, metaDisplay, metaRaw } from "./file-meta";
 import { parseClipboardTable } from "./import";
 import { iconForWidget, widgetForKey } from "./props-editor";
 import { TOOLBOX_TOOLS, addToolboxMenu, toolboxInstalled } from "./toolbox";
@@ -430,6 +432,8 @@ export class GridView extends ItemView {
     const cfg = this.cfg();
     // Columns: file + visible props + formulas + headings.
     this.cols = [{ kind: "file", key: "file" }];
+    for (const m of cfg.metaColumns ?? [])
+      if (metaColumn(m)) this.cols.push({ kind: "meta", key: m });
     for (const p of this.store.propColumns)
       if (!cfg.hidden.includes(p)) this.cols.push({ kind: "prop", key: p });
     for (const f of cfg.formulas ?? []) this.cols.push({ kind: "formula", key: f.name });
@@ -479,7 +483,7 @@ export class GridView extends ItemView {
       rows = rows.filter(
         (r) =>
           keep?.has(r.file.path) ||
-          colFilters.every(([c, f]) => passesColFilter(cellValues(r, c), f))
+          colFilters.every(([c, f]) => passesColFilter(cellValues(r, c), f, cellStamp(r, c)))
       );
     }
     if (needle) {
@@ -495,7 +499,9 @@ export class GridView extends ItemView {
               ? r.headings[c.key]
               : c.kind === "formula"
                 ? r.formulas?.[c.key]
-                : valueToDisplay(r.fm[c.key]);
+                : c.kind === "meta"
+                  ? metaDisplay(r.file, c.key)
+                  : valueToDisplay(r.fm[c.key]);
           if (v && String(v).toLowerCase().includes(needle)) return true;
         }
         return false;
@@ -512,6 +518,7 @@ export class GridView extends ItemView {
       const val = (r: Row): unknown => {
         if (sort.key === "file") return r.file.basename;
         const col = this.cols.find((c) => c.key === sort.key);
+        if (col?.kind === "meta") return metaRaw(r.file, sort.key);
         if (col?.kind === "heading") return r.headings[sort.key] ?? "";
         if (col?.kind === "formula") return r.formulas?.[sort.key] ?? "";
         return r.fm[sort.key];
@@ -623,6 +630,8 @@ export class GridView extends ItemView {
       const v =
         c.kind === "file"
           ? r.file.basename
+          : c.kind === "meta"
+            ? metaDisplay(r.file, c.key)
           : c.kind === "heading"
             ? (r.headings[c.key] ?? "").split("\n")[0]
             : c.kind === "formula"
@@ -662,9 +671,22 @@ export class GridView extends ItemView {
     this.frozenLeft = frozenLeft;
     const sort = this.cfg().sort;
     this.cols.forEach((c, ci) => {
-      const shown = c.kind === "prop" ? this.cfg().rename?.[c.key] ?? c.key : c.key;
+      const shown =
+        c.kind === "prop"
+          ? this.cfg().rename?.[c.key] ?? c.key
+          : c.kind === "meta"
+            ? metaColumn(c.key)?.label ?? c.key
+            : c.key;
       const label =
-        c.kind === "heading" ? `# ${shown}` : c.kind === "formula" ? `ƒ ${shown}` : shown;
+        c.kind === "heading"
+          ? `# ${shown}`
+          : c.kind === "formula"
+            ? `ƒ ${shown}`
+            : c.kind === "meta"
+              // A clock only fits the date ones; size/extension/folder get the
+              // plugin's table glyph so they still read as file metadata.
+              ? `${isMetaDate(c.key) ? "⏱" : "▤"} ${shown}`
+              : shown;
       const th = hr.createEl("th", { cls: `gridsense-col-${c.kind}` });
       if (ci < frozenLeft.length) {
         th.addClass("gridsense-frozen-col");
@@ -702,6 +724,15 @@ export class GridView extends ItemView {
           e.stopPropagation();
           if (c.kind === "heading") void this.removeHeadingColumn(c.key);
           else void this.removeFormulaColumn(c.key);
+        });
+      }
+      if (c.kind === "meta") {
+        th.setAttr("title", `File ${metaColumn(c.key)?.label.toLowerCase() ?? c.key} — read-only`);
+        const x = th.createSpan({ cls: "gridsense-remove-col", text: "×" });
+        x.setAttr("title", `Hide the ${metaColumn(c.key)?.label ?? c.key} column`);
+        x.addEventListener("click", (e) => {
+          e.stopPropagation();
+          void this.setMetaColumn(c.key, false);
         });
       }
       if (c.kind === "prop") {
@@ -813,7 +844,7 @@ export class GridView extends ItemView {
     tr.createEl("td", { cls: "gridsense-rownum", text: "＋" });
     for (const c of this.cols) {
       const td = tr.createEl("td", { cls: "gridsense-draft-cell" });
-      if (c.kind === "heading" || c.kind === "formula") continue;
+      if (c.kind === "heading" || c.kind === "formula" || c.kind === "meta") continue;
       const key = c.kind === "file" ? "file" : c.key;
       const input = td.createEl("input", {
         cls: "gridsense-draft-input",
@@ -1002,6 +1033,18 @@ export class GridView extends ItemView {
         td.setAttr("title", "Row count");
         continue;
       }
+      if (c.kind === "meta") {
+        // Dates summarise as the span they cover; the rest stay blank, since
+        // "0 filled" would be a lie (file metadata is always present).
+        if (isMetaDate(c.key) && this.viewRows.length) {
+          const stamps = this.viewRows.map((r) => metaRaw(r.file, c.key) as number);
+          const lo = Math.min(...stamps);
+          const hi = Math.max(...stamps);
+          td.setText(`${new Date(lo).toISOString().slice(0, 10)} → ${new Date(hi).toISOString().slice(0, 10)}`);
+          td.setAttr("title", `Oldest and newest ${metaColumn(c.key)?.label.toLowerCase()} in view`);
+        }
+        continue;
+      }
       let filled = 0;
       let numeric = 0;
       let sum = 0;
@@ -1161,6 +1204,7 @@ export class GridView extends ItemView {
     const c = this.cols[ci];
     if (!row || !c) return "";
     if (c.kind === "file") return row.file.basename;
+    if (c.kind === "meta") return metaDisplay(row.file, c.key);
     if (c.kind === "heading") return row.headings[c.key] ?? "";
     if (c.kind === "formula") return row.formulas?.[c.key] ?? "";
     return row.fm[c.key];
@@ -1536,11 +1580,13 @@ export class GridView extends ItemView {
     }
     const c = this.cols[ci];
     if (!c || c.kind === "file") return;
-    if (c.kind === "heading" || c.kind === "formula") {
+    if (c.kind === "heading" || c.kind === "formula" || c.kind === "meta") {
       new Notice(
         c.kind === "heading"
           ? "Heading columns are read-only previews (edit the note body)"
-          : "Formula columns are computed (edit via ▦ columns)"
+          : c.kind === "meta"
+            ? `${metaColumn(c.key)?.label ?? c.key} comes from the file itself — read-only`
+            : "Formula columns are computed (edit via ▦ columns)"
       );
       return;
     }
@@ -2049,7 +2095,7 @@ export class GridView extends ItemView {
     const counts = new Map<string, number>();
     let blankCount = 0;
     for (const r of this.colFilterBase) {
-      if (!others.every(([o, f]) => passesColFilter(cellValues(r, o), f))) continue;
+      if (!others.every(([o, f]) => passesColFilter(cellValues(r, o), f, cellStamp(r, o)))) continue;
       const vals = cellValues(r, c);
       if (vals.every((v) => v === "")) {
         blankCount++;
@@ -2065,7 +2111,12 @@ export class GridView extends ItemView {
       app: this.app,
       anchor,
       column: c,
-      label: c.kind === "file" ? "File name" : shown,
+      label:
+        c.kind === "file"
+          ? "File name"
+          : c.kind === "meta"
+            ? metaColumn(c.key)?.label ?? c.key
+            : shown,
       distinct,
       blankCount,
       current: this.cfg().colFilters?.[key],
@@ -2156,6 +2207,27 @@ export class GridView extends ItemView {
     await set(undefined);
     this.engine.pushUi("clear column filters", () => set(saved), () => set(undefined));
     new Notice("GridSense: cleared column filters — ⌘Z to undo");
+  }
+
+  /** Show or hide one built-in file-metadata column. Undoable like any hide. */
+  async setMetaColumn(key: string, show: boolean) {
+    const apply = async (on: boolean) => {
+      const cfg = this.cfg();
+      const set = new Set(cfg.metaColumns ?? []);
+      if (on) set.add(key);
+      else set.delete(key);
+      if (set.size) cfg.metaColumns = META_COLUMNS.filter((m) => set.has(m.key)).map((m) => m.key);
+      else delete cfg.metaColumns;
+      await this.plugin.saveSettings();
+      await this.render();
+    };
+    await apply(show);
+    const label = metaColumn(key)?.label ?? key;
+    this.engine.pushUi(
+      `${show ? "show" : "hide"} ${label} column`,
+      () => apply(!show),
+      () => apply(show)
+    );
   }
 
   async hideColumn(key: string) {
@@ -2743,6 +2815,19 @@ class ColumnsModal extends Modal {
       setting.nameEl.prepend(icon);
     }
 
+    c = this.section(root, "File metadata", "meta", false);
+    c.createDiv({
+      cls: "setting-item-description",
+      text: "Read-only columns taken from the file itself. Sort them, and filter them from the column header — date columns offer \u201Cin the last \u2026 days\u201D.",
+    });
+    for (const m of META_COLUMNS) {
+      new Setting(c).setName(m.label).addToggle((t) =>
+        t.setValue((cfg.metaColumns ?? []).includes(m.key)).onChange(async (v) => {
+          await this.view.setMetaColumn(m.key, v);
+        })
+      );
+    }
+
     c = this.section(root, "Heading columns", "headings", false);
     if (!cfg.headingColumns.length)
       c.createDiv({ cls: "gridsense-props-empty", text: "None yet — add one below." });
@@ -2981,7 +3066,13 @@ class FiltersModal extends Modal {
         .addText((t) => {
           t.setPlaceholder("property");
           t.setValue(cond.prop);
-          new ListSuggest(this.view.app, t.inputEl, () => this.view.propertyNameSuggestions());
+          new ListSuggest(this.view.app, t.inputEl, () => [
+            // file.* reads the file itself rather than frontmatter.
+            ...META_COLUMNS.map((m) => `file.${m.key}`),
+            "file.name",
+            "file.path",
+            ...this.view.propertyNameSuggestions(),
+          ]);
           t.onChange(async (v) => {
             cond.prop = v.trim();
             await this.view.filtersChanged();
@@ -2990,6 +3081,10 @@ class FiltersModal extends Modal {
         .addDropdown((d) => {
           for (const op of ["=", "!=", ">", "<", ">=", "<=", "contains", "empty", "not-empty"])
             d.addOption(op, op);
+          // Only meaningful against file.mtime / file.ctime.
+          d.addOption("last-days", "in the last … days");
+          d.addOption("after", "after (date)");
+          d.addOption("before", "before (date)");
           d.setValue(cond.op).onChange(async (v) => {
             cond.op = v as Condition["op"];
             await this.view.filtersChanged();
