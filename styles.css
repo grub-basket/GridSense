@@ -361,17 +361,20 @@ tfoot .gridsense-draft td {
 
 /* ------------------------- inline properties takeover -------------------- */
 
-/* Applied per properties container so per-note overrides can differ. */
+/* Applied per properties container so per-note overrides can differ. Obsidian's
+   HEADING is deliberately left visible: it carries the collapse chevron, and
+   hiding it stranded anyone who collapsed the panel in Obsidian mode and then
+   switched here — the panel stayed collapsed with no control to reopen it. */
 .metadata-container.gridsense-inline-props .metadata-properties,
-.metadata-container.gridsense-inline-props .metadata-properties-heading,
 .metadata-container.gridsense-inline-props .metadata-add-button {
   display: none;
 }
 
-/* Obsidian's own "Properties" heading is redundant next to our switch button,
-   which already says which mode you'd move to. */
-.metadata-container.gridsense-has-toggle .metadata-properties-heading .metadata-properties-title {
-  display: none;
+/* The switch button is its own row under Obsidian's heading (it can't live IN
+   the heading — that row is the collapse control). Obsidian's own "Properties"
+   title stays, since the button no longer replaces it. */
+.metadata-container.gridsense-has-toggle > .gridsense-enable-toggle {
+  margin: 2px 0 6px;
 }
 
 .gridsense-inline-strip {
@@ -940,4 +943,12 @@ tfoot .gridsense-draft td {
   justify-content: flex-end;
   gap: 8px;
   padding-top: 16px;
+}
+
+/* Obsidian's collapse chevron must collapse OUR editor too, otherwise the
+   chevron looks dead whenever the takeover is on (it would only be hiding the
+   native panel, which the takeover already hides). */
+.metadata-container.is-collapsed .gridsense-inline-strip,
+.metadata-container.is-collapsed > .gridsense-enable-toggle {
+  display: none;
 }

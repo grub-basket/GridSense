@@ -5,6 +5,16 @@ import { PropsEditor } from "./props-editor";
 import { appendHistory } from "./history-log";
 
 const BODY_CLASS = "gridsense-inline-props";
+
+/**
+ * Keep a click from reaching Obsidian's properties header, which treats a click
+ * anywhere on it as collapse/expand. Pointer events are stopped too: the header
+ * acts on pointerdown, before any click handler runs.
+ */
+function stopBubbling(el: HTMLElement) {
+  for (const type of ["pointerdown", "mousedown", "dblclick"])
+    el.addEventListener(type, (e) => e.stopPropagation());
+}
 const STRIP_CLASS = "gridsense-inline-strip";
 
 interface Mount {
@@ -133,13 +143,20 @@ export class InlinePropsManager {
     });
     btn.setAttr("title", "Switch this note to GridSense's property editor (beta)");
     host.addClass("gridsense-has-toggle");
-    // Sit in Obsidian's own heading row (whose title we hide) rather than
-    // stacking a second line above it.
+    // NOT inside .metadata-properties-heading: that row is Obsidian's collapse
+    // control, so a button living in it collapses the panel on the way to our
+    // handler — the click then both switched the mode and hid the result, which
+    // read as "the toggle only expands/collapses". It sits after the heading as
+    // its own row instead, and still collapses with the panel (it's a child of
+    // the container, which is what Obsidian's collapsed state hides).
     const heading = host.querySelector(".metadata-properties-heading");
-    if (heading) heading.prepend(btn);
+    if (heading) heading.insertAdjacentElement("afterend", btn);
     else host.prepend(btn);
     const path = view.file?.path;
-    btn.addEventListener("click", async () => {
+    stopBubbling(btn);
+    btn.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
       if (path) await this.setOverride(path, true);
     });
   }
@@ -173,7 +190,10 @@ export class InlinePropsManager {
       text: "Obsidian properties",
     });
     toggle.setAttr("title", "Switch back to Obsidian's properties panel (GridSense setting)");
-    toggle.addEventListener("click", async () => {
+    stopBubbling(toggle);
+    toggle.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
       await this.setOverride(file.path, false);
       new Notice(`GridSense: "${file.basename}" now uses Obsidian's properties panel`);
     });
