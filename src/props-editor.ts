@@ -346,7 +346,38 @@ export class PropsEditor {
       const wrap = valEl.createDiv({ cls: "gridsense-chips" });
       row.value.forEach((item, idx) => {
         const chip = wrap.createSpan({ cls: "gridsense-chip" });
-        chip.createSpan({ text: valueToDisplay(item) });
+        chip.setAttr("draggable", "true");
+        const text = chip.createSpan({ cls: "gridsense-chip-text", text: valueToDisplay(item) });
+        text.setAttr("title", "Click to edit this item · drag to reorder");
+        // Click a chip to edit THAT item in place — distinct from the row
+        // pencil, which edits the property key. mousedown-guarded so a drag
+        // doesn't also open the editor.
+        let dragged = false;
+        chip.addEventListener("mousedown", () => {
+          dragged = false;
+        });
+        chip.addEventListener("dragstart", (e) => {
+          dragged = true;
+          // Tag the drag with the OWNING property, so dropping a chip onto a
+          // different list is ignored rather than reordering that list with a
+          // foreign index.
+          e.dataTransfer?.setData("text/gridsense-chip", `${row.key}\u0000${idx}`);
+          chip.addClass("is-dragging");
+        });
+        chip.addEventListener("dragend", () => chip.removeClass("is-dragging"));
+        chip.addEventListener("dragover", (e) => e.preventDefault());
+        chip.addEventListener("drop", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const raw = e.dataTransfer?.getData("text/gridsense-chip") ?? "";
+          const [srcKey, fromStr] = raw.split("\u0000");
+          const from = Number(fromStr);
+          if (srcKey === row.key && Number.isInteger(from)) void this.moveListItem(row, from, idx);
+        });
+        text.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (!dragged) this.editChip(chip, row, idx);
+        });
         const x = chip.createSpan({ cls: "gridsense-chip-x", text: "×" });
         x.setAttr("title", "Remove item (undoable)");
         x.addEventListener("click", (e) => {
@@ -355,6 +386,14 @@ export class PropsEditor {
         });
       });
       if (!row.value.length) wrap.createSpan({ cls: "gridsense-chips-empty", text: "(empty list)" });
+      // Append affordance, so a list can grow item-by-item without retyping the
+      // whole comma string in the value cell.
+      const add = wrap.createSpan({ cls: "gridsense-chip gridsense-chip-add", text: "+ add" });
+      add.setAttr("title", "Add an item to this list");
+      add.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.addChip(add, row);
+      });
       return;
     }
     valEl.setText(valueToDisplay(row.value));
@@ -511,6 +550,102 @@ export class PropsEditor {
     row.value = value;
     await this.engine.apply(`edit ${row.key}`, [{ file: this.file, key: row.key, value }]);
     this.load();
+  }
+
+  /** Replace a list's items as one undoable write, keeping the property alive. */
+  private async setListItems(row: PropRow, next: unknown[], label: string) {
+    row.value = next;
+    await this.engine.apply(label, [{ file: this.file, key: row.key, value: next }]);
+    this.load();
+  }
+
+  /** Swap an inline input in for one chip; commit on Enter/blur, cancel on Esc. */
+  private editChip(chip: HTMLElement, row: PropRow, idx: number) {
+    if (this.editing || !Array.isArray(row.value)) return;
+    this.editing = true;
+    const original = valueToDisplay(row.value[idx]);
+    chip.empty();
+    chip.addClass("is-editing");
+    const input = chip.createEl("input", { cls: "gridsense-chip-input", type: "text" });
+    input.value = original;
+    let done = false;
+    const finish = async (commit: boolean) => {
+      if (done) return;
+      done = true;
+      this.editing = false;
+      const text = input.value.trim();
+      if (!commit || text === original) return this.load();
+      if (!Array.isArray(row.value)) return this.load();
+      const next = row.value.slice();
+      if (text === "") next.splice(idx, 1); // emptied an item = drop it
+      else next[idx] = this.coerceItem(row.key, text);
+      await this.setListItems(row, next, `edit item in ${row.key}`);
+    };
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") {
+        e.preventDefault();
+        void finish(true);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        void finish(false);
+      }
+    });
+    input.addEventListener("blur", () => void finish(true));
+    input.focus();
+    input.select();
+  }
+
+  /** The "+ add" affordance: an inline input that appends one item. */
+  private addChip(add: HTMLElement, row: PropRow) {
+    if (this.editing || !Array.isArray(row.value)) return;
+    this.editing = true;
+    add.empty();
+    add.removeClass("gridsense-chip-add");
+    add.addClass("is-editing");
+    const input = add.createEl("input", { cls: "gridsense-chip-input", type: "text" });
+    input.setAttr("placeholder", "new item");
+    let done = false;
+    const finish = async (commit: boolean) => {
+      if (done) return;
+      done = true;
+      this.editing = false;
+      const text = input.value.trim();
+      if (!commit || text === "" || !Array.isArray(row.value)) return this.load();
+      await this.setListItems(
+        row,
+        [...row.value, this.coerceItem(row.key, text)],
+        `add item to ${row.key}`
+      );
+    };
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") {
+        e.preventDefault();
+        void finish(true);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        void finish(false);
+      }
+    });
+    input.addEventListener("blur", () => void finish(true));
+    input.focus();
+  }
+
+  /** Reorder one item within a list (drag between chips). */
+  private async moveListItem(row: PropRow, from: number, to: number) {
+    if (!Array.isArray(row.value) || from === to) return;
+    if (from < 0 || to < 0 || from >= row.value.length || to >= row.value.length) return;
+    const next = row.value.slice();
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    await this.setListItems(row, next, `reorder ${row.key}`);
+  }
+
+  /** A single list item, typed like the list itself (tags lose a leading #). */
+  private coerceItem(key: string, text: string): string {
+    const clean = normalizeWikiBrackets(text);
+    return this.widgetFor(key) === "tags" ? clean.replace(/^#/, "") : clean;
   }
 
   private async removeListItem(row: PropRow, idx: number) {

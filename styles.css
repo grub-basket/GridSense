@@ -475,6 +475,43 @@ tfoot .gridsense-draft td {
   font-size: var(--font-ui-smaller);
 }
 
+/* Per-chip editing: the text is clickable, the whole chip is draggable. */
+.gridsense-chip-text {
+  cursor: text;
+}
+.gridsense-chip[draggable="true"] {
+  cursor: grab;
+}
+.gridsense-chip.is-dragging {
+  opacity: 0.5;
+}
+.gridsense-chip.is-editing {
+  padding: 0 2px;
+}
+.gridsense-chip-input {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: var(--font-ui-smaller);
+  line-height: 1.6;
+  width: 8em;
+  padding: 0 4px;
+}
+.gridsense-chip-input:focus {
+  outline: none;
+}
+/* The "+ add" pseudo-chip reads as an action, not a value. */
+.gridsense-chip-add {
+  cursor: pointer;
+  background: transparent;
+  color: var(--text-faint);
+  border: 1px dashed var(--background-modifier-border);
+}
+.gridsense-chip-add:hover {
+  color: var(--text-normal);
+  border-color: var(--text-muted);
+}
+
 .gridsense-props-add {
   display: flex;
   align-items: center;
