@@ -231,9 +231,47 @@ export class PropsEditor {
       keyEl.addEventListener("click", pick("key"));
       valEl.addEventListener("click", pick("value"));
 
-      const del = rowEl.createDiv({ cls: "gridsense-props-del", text: "×" });
-      del.setAttr("title", `Delete "${row.key}" (undoable)`);
-      del.addEventListener("click", () => void this.deleteRowAt(i));
+      // Grab / edit / delete, so reordering, renaming and removing a property
+      // are all one click away instead of living behind the type menu.
+      const actions = rowEl.createDiv({ cls: "gridsense-props-actions" });
+      const act = (icon: string, title: string, fn: (e: MouseEvent) => void) => {
+        const b = actions.createDiv({ cls: "gridsense-props-act" });
+        setIcon(b, icon);
+        b.setAttr("title", title);
+        b.addEventListener("click", (e) => {
+          e.stopPropagation();
+          fn(e);
+        });
+        return b;
+      };
+      const grab = act("grip-vertical", "Drag to reorder (or Alt+↑/↓)", () => undefined);
+      grab.addEventListener("mousedown", () => {
+        rowEl.draggable = true;
+      });
+      grab.addEventListener("mouseup", () => {
+        rowEl.draggable = false;
+      });
+      rowEl.addEventListener("dragstart", (e) => {
+        e.dataTransfer?.setData("text/gridsense-prop", String(i));
+        rowEl.addClass("is-dragging");
+      });
+      rowEl.addEventListener("dragend", () => {
+        rowEl.draggable = false;
+        rowEl.removeClass("is-dragging");
+      });
+      rowEl.addEventListener("dragover", (e) => e.preventDefault());
+      rowEl.addEventListener("drop", (e) => {
+        e.preventDefault();
+        const from = Number(e.dataTransfer?.getData("text/gridsense-prop"));
+        if (Number.isInteger(from)) void this.moveRow(from, i);
+      });
+      act("pencil", `Rename "${row.key}"`, () => {
+        this.sel = i;
+        this.cell = "key";
+        this.paint();
+        this.beginEdit();
+      });
+      act("trash-2", `Delete "${row.key}" (undoable)`, () => void this.deleteRowAt(i));
     });
     const add = this.listEl!.createDiv({ cls: "gridsense-props-add" });
     const addIcon = add.createSpan();
@@ -371,6 +409,14 @@ export class PropsEditor {
     const target = e.target as HTMLElement;
     if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
     const mod = e.metaKey || e.ctrlKey;
+    if (e.altKey && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+      // Keyboard equivalent of the grab handle — drag is unusable on mobile
+      // and awkward for one-position nudges.
+      e.preventDefault();
+      const to = this.sel + (e.key === "ArrowDown" ? 1 : -1);
+      void this.moveRow(this.sel, to);
+      return;
+    }
     if (e.key === "ArrowDown" && !mod) {
       e.preventDefault();
       this.sel = Math.min(this.rows.length - 1, this.sel + 1);
@@ -476,6 +522,44 @@ export class PropsEditor {
       { file: this.file, key: row.key, value: next },
     ]);
     this.load();
+  }
+
+  /**
+   * Reorder frontmatter keys. YAML key order IS the stored order, so this
+   * rewrites the whole block: keys are re-added in the new sequence. Undoable
+   * as one step (the values never change, only their order).
+   */
+  async moveRow(from: number, to: number) {
+    if (this.editing) return;
+    const keys = this.rows.map((r) => r.key).filter((k) => k);
+    if (from < 0 || to < 0 || from >= keys.length || to >= keys.length || from === to) return;
+    const before = keys.slice();
+    const after = keys.slice();
+    const [moved] = after.splice(from, 1);
+    after.splice(to, 0, moved);
+    const write = async (order: string[]) => {
+      await this.app.fileManager.processFrontMatter(
+        this.file,
+        (fm: Record<string, unknown>) => {
+          const kept: [string, unknown][] = [];
+          for (const k of order) if (k in fm) kept.push([k, fm[k]]);
+          // Anything added behind our back (another plugin, a sync) keeps its
+          // value and lands after the keys we know about, rather than vanishing.
+          for (const k of Object.keys(fm)) if (!order.includes(k)) kept.push([k, fm[k]]);
+          for (const k of Object.keys(fm)) delete fm[k];
+          for (const [k, v] of kept) fm[k] = v;
+        }
+      );
+      this.load();
+    };
+    await write(after);
+    this.sel = to;
+    this.paint();
+    this.engine.pushUi(
+      `reorder "${moved}"`,
+      () => write(before),
+      () => write(after)
+    );
   }
 
   private async renameKey(row: PropRow, newKey: string) {

@@ -418,7 +418,9 @@ tfoot .gridsense-draft td {
 
 .gridsense-props-row {
   display: grid;
-  grid-template-columns: 24px minmax(120px, 1fr) 2fr 18px;
+  /* Last column holds the grab/rename/delete buttons — it was 18px, sized for
+     the single × that used to live there, which clipped the other two. */
+  grid-template-columns: 24px minmax(120px, 1fr) 2fr 78px;
   gap: 2px;
   align-items: start;
 }
@@ -951,4 +953,38 @@ tfoot .gridsense-draft td {
 .metadata-container.is-collapsed .gridsense-inline-strip,
 .metadata-container.is-collapsed > .gridsense-enable-toggle {
   display: none;
+}
+
+/* ------------------------------------------------ property row actions */
+.gridsense-props-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 4px;
+}
+.gridsense-props-act {
+  flex: 0 0 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-s);
+  color: var(--text-faint);
+  cursor: pointer;
+}
+.gridsense-props-act:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+.gridsense-props-act .svg-icon {
+  width: 14px;
+  height: 14px;
+}
+/* The grab handle is the drag affordance, so it gets the move cursor. */
+.gridsense-props-act:first-child {
+  cursor: grab;
+}
+.gridsense-props-row.is-dragging {
+  opacity: 0.5;
 }
