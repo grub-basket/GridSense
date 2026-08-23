@@ -175,6 +175,8 @@ export interface GridSenseSettings {
   trashFolder: string;
   /** Per-note overrides for the properties takeover (path → on/off). */
   inlinePropsOverrides: Record<string, boolean>;
+  /** Route clicks on notes in a Stashpad folder to the Stashpad view. */
+  openStashpadNotes: boolean;
   /** DEFAULT open/closed state of the columns-modal sections, vault-wide.
    *  Individual grids can override these (FolderConfig.sections). */
   columnsSectionDefaults?: Record<string, boolean>;
@@ -189,4 +191,5 @@ export const DEFAULT_SETTINGS: GridSenseSettings = {
   configFilePath: "gridsense-config.json",
   trashFolder: "GridSense Trash",
   inlinePropsOverrides: {},
+  openStashpadNotes: false,
 };

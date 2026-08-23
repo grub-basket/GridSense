@@ -1,6 +1,7 @@
 import { FuzzySuggestModal, Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder } from "obsidian";
 import { GRID_VIEW_TYPE, GridView } from "./grid-view";
 import { NotePropsModal } from "./note-props";
+import { warnStashpadMissing } from "./stashpad-links";
 import { InlinePropsManager } from "./inline-props";
 import { DEFAULT_SETTINGS, FolderConfig, GridSenseSettings } from "./types";
 import { ConfigFileStore } from "./config-file";
@@ -309,6 +310,18 @@ class GridSenseSettingTab extends PluginSettingTab {
           this.plugin.settings.inlineProps = v;
           await this.plugin.saveSettings();
           this.plugin.inlineProps?.apply();
+        })
+      );
+    new Setting(this.containerEl)
+      .setName("Open Stashpad notes in Stashpad")
+      .setDesc(
+        "When a grid row's note lives in a Stashpad folder, clicking it opens the note in Stashpad's own view (keeping its parent/children context) instead of the markdown editor. Cmd/Ctrl-click and middle-click do the same in a new tab. Needs the Stashpad plugin; other notes open normally."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.openStashpadNotes).onChange(async (v) => {
+          this.plugin.settings.openStashpadNotes = v;
+          await this.plugin.saveSettings();
+          if (v) warnStashpadMissing(this.app);
         })
       );
     new Setting(this.containerEl)

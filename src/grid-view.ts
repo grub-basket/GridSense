@@ -42,6 +42,7 @@ import {
 import { ZoomValueModal } from "./zoom";
 import { AddRowModal } from "./add-row";
 import { META_COLUMNS, isMetaDate, metaColumn, metaDisplay, metaRaw } from "./file-meta";
+import { openInStashpad, stashpadTargetFor } from "./stashpad-links";
 import { parseClipboardTable } from "./import";
 import { iconForWidget, widgetForKey } from "./props-editor";
 import { TOOLBOX_TOOLS, addToolboxMenu, toolboxInstalled } from "./toolbox";
@@ -1217,9 +1218,26 @@ export class GridView extends ItemView {
     if (!c || !row) return;
     if (c.kind === "file") {
       const a = td.createEl("a", { text: row.file.basename, cls: "gridsense-filelink" });
+      const openRow = (e: MouseEvent) => {
+        const newTab = e.metaKey || e.ctrlKey || (e as MouseEvent).button === 1;
+        // Stashpad hand-off (opt-in): a note living in a Stashpad folder opens
+        // in Stashpad's own view, keeping its parent/children context, rather
+        // than the plain editor. Falls through to the editor for everything
+        // else — attachments, author files, non-Stashpad notes.
+        if (this.plugin.settings.openStashpadNotes) {
+          const target = stashpadTargetFor(this.app, row.file);
+          if (target && openInStashpad(this.app, target, newTab)) return;
+        }
+        void this.app.workspace.getLeaf(newTab ? "tab" : false).openFile(row.file);
+      };
       a.addEventListener("click", (e) => {
         e.preventDefault();
-        void this.app.workspace.getLeaf(e.metaKey || e.ctrlKey ? "tab" : false).openFile(row.file);
+        openRow(e);
+      });
+      a.addEventListener("auxclick", (e) => {
+        if (e.button !== 1) return; // middle-click = new tab; ignore right-click
+        e.preventDefault();
+        openRow(e);
       });
       a.addEventListener("contextmenu", (e) => {
         e.preventDefault();
