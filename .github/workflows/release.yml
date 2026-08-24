@@ -21,6 +21,47 @@ jobs:
         id: version
         run: echo "version=$(jq -r .version manifest.json)" >> "$GITHUB_OUTPUT"
 
+      # versions.json is what the community store reads to decide which build to
+      # serve an older Obsidian install. NOTHING generates it — not the build, not
+      # this workflow — so it rots silently: this repo shipped nine releases
+      # (0.17.0 through 0.22.0) against a versions.json frozen at 0.16.3 before it
+      # was spotted on 2026-08-24. Fail the release rather than publish a tenth.
+      # Runs unconditionally (before the release-exists gate) so workflow_dispatch
+      # can exercise it without publishing anything.
+      - name: Verify versions.json covers this release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ ! -f versions.json ]; then
+            echo "::error::versions.json is missing — the store cannot map $VERSION to a minAppVersion."
+            exit 1
+          fi
+          if ! jq -e . versions.json >/dev/null 2>&1; then
+            echo "::error::versions.json is not valid JSON."
+            exit 1
+          fi
+          MIN=$(jq -r '.minAppVersion' manifest.json)
+          MAPPED=$(jq -r --arg v "$VERSION" '.[$v] // empty' versions.json)
+          if [ -z "$MAPPED" ]; then
+            echo "::error::versions.json has no entry for $VERSION. Add \"$VERSION\": \"$MIN\" to versions.json and push again."
+            exit 1
+          fi
+          if [ "$MAPPED" != "$MIN" ]; then
+            echo "::error::versions.json maps $VERSION -> $MAPPED but manifest.minAppVersion is $MIN."
+            exit 1
+          fi
+          echo "versions.json OK: $VERSION -> $MAPPED"
+
+          # Historical rot: warn, don't block — an old unmapped tag is not this
+          # release's fault, but it should still be visible.
+          MISSING=""
+          for tag in $(git tag | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$'); do
+            jq -e --arg v "$tag" 'has($v)' versions.json >/dev/null 2>&1 || MISSING="$MISSING $tag"
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::warning::released tags missing from versions.json:$MISSING"
+          fi
+
       # Gate on the RELEASE, not the tag: a tag pushed by hand used to make every
       # later step skip, so the run went green while publishing nothing.
       - name: Check if the release already exists
