@@ -196,9 +196,19 @@ export class GridView extends ItemView {
     this.folder = state?.folder ?? "";
     this.attachStore();
     this.buildChrome();
-    // Paint instantly from the on-disk snapshot, then compile for real.
+    // Load the on-disk snapshot (in-memory rows, no per-file work) so the first
+    // paint has data, then paint OFF the synchronous layout-restore path. At
+    // vault start Obsidian calls setState for every restored leaf in turn, so
+    // awaiting a full table build here delays the whole workspace from finishing
+    // layout — a grid tab left open would block the vault appearing ready by its
+    // render time. Yielding to the next frame lets layout finish first; the grid
+    // then paints from the snapshot and compiles after.
     if (this.store!.isEmpty) await this.store!.loadSnapshot();
-    await this.render();
+    // setTimeout, NOT requestAnimationFrame: a backgrounded/unfocused window
+    // pauses rAF entirely, which would leave a restored grid in a background tab
+    // blank until it's focused. A timer still fires (throttled in the
+    // background, but it fires), so the grid always paints.
+    (this.containerEl.win ?? window).setTimeout(() => void this.render(), 0);
     // @ts-expect-error obsidian's setState signature varies across versions
     return super.setState(state, result);
   }
