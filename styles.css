@@ -1025,3 +1025,9 @@ tfoot .gridsense-draft td {
 .gridsense-props-row.is-dragging {
   opacity: 0.5;
 }
+
+/* Import preview: helper-column cells read as "added by you", not pasted data. */
+.gridsense-import-preview .gridsense-import-helper {
+  color: var(--text-muted);
+  font-style: italic;
+}

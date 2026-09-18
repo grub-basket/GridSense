@@ -13,6 +13,7 @@ Excel-grade grid over your Obsidian notes' frontmatter — a standalone alternat
 - **Open Stashpad notes in Stashpad** (setting, off by default) — when a grid row's note lives in a Stashpad folder, clicking it opens the note in Stashpad's own view (keeping its parent/children context) instead of the markdown editor. Cmd/Ctrl-click and middle-click do the same in a new tab. Needs the Stashpad plugin; every other note opens normally, and nothing breaks when Stashpad is absent.
 - **Find & replace in selection** (⌘F) — or the whole grid when nothing is selected.
 - **Heading-content columns** — add a read-only column showing each note's body text under a chosen heading (for the stuff you keep outside frontmatter).
+- **Spreadsheet importer with helper columns** — paste from Excel/Sheets/Numbers, map columns to properties, and add extra *helper columns* (empty, or with a default) that are seeded on every imported note so the grid has ready-to-fill columns the source didn't contain.
 - **Compiled database** — the grid is rendered from a compiled snapshot of your frontmatter, persisted as JSON under `.obsidian/plugins/gridsense/db/`, auto-invalidated by metadata-cache events.
 - **Keyboard-first property editor** — command *Edit properties of current note*: navigate, edit, rename, add, and delete properties without touching the mouse; every write is undoable.
 

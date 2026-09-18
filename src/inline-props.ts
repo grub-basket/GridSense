@@ -1,4 +1,4 @@
-import { App, MarkdownView, Notice, TFile, debounce } from "obsidian";
+import { App, MarkdownView, TFile, debounce } from "obsidian";
 import type GridSensePlugin from "./main";
 import { EditEngine } from "./edits";
 import { PropsEditor } from "./props-editor";
@@ -195,7 +195,8 @@ export class InlinePropsManager {
       e.preventDefault();
       e.stopPropagation();
       await this.setOverride(file.path, false);
-      new Notice(`GridSense: "${file.basename}" now uses Obsidian's properties panel`);
+      // No Notice: the panel visibly swaps to Obsidian's on the same click, so
+      // a toast on every switch is just noise (user feedback, 2026-09-18).
     });
     const engine = new EditEngine(this.app, (entry) =>
       void appendHistory(

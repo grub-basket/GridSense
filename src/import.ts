@@ -35,6 +35,9 @@ export class PasteImportModal extends Modal {
   private hasHeader = true;
   private nameCol = 0;
   private props: string[] = [];
+  /** Extra columns not in the paste — empty "helper" properties seeded on every
+   *  created note so they show up in the grid, ready to type into. */
+  private extraCols: { name: string; value: string }[] = [];
   private folder: string;
   private backupPath = "";
 
@@ -136,6 +139,39 @@ export class PasteImportModal extends Modal {
         });
     });
 
+    // Helper columns: properties that don't come from the paste. Seeded empty
+    // (or with a default) on every note, so the grid shows the column with a
+    // cell to write into — "helper columns to write notes in" (user, 2026-09-18).
+    c.createEl("div", { cls: "setting-item-heading", text: "Helper columns" });
+    c.createDiv({
+      cls: "gridsense-props-hint",
+      text: "Extra properties added to every imported note. Leave the value empty for a blank column you fill in later; a helper never overwrites a value that came from the paste.",
+    });
+    this.extraCols.forEach((col, i) => {
+      new Setting(c)
+        .addText((t) => {
+          t.setValue(col.name).setPlaceholder("property name");
+          new ListSuggest(this.app, t.inputEl, () => this.plugin.knownPropertyNames());
+          t.onChange((v) => (col.name = v.trim()));
+        })
+        .addText((t) => {
+          t.setValue(col.value).setPlaceholder("default value (optional)");
+          t.onChange((v) => (col.value = v));
+        })
+        .addExtraButton((b) =>
+          b.setIcon("trash").setTooltip("Remove this helper column").onClick(() => {
+            this.extraCols.splice(i, 1);
+            this.renderBody();
+          })
+        );
+    });
+    new Setting(c).addButton((b) =>
+      b.setButtonText("Add helper column").onClick(() => {
+        this.extraCols.push({ name: "", value: "" });
+        this.renderBody();
+      })
+    );
+
     // Preview so problems are visible before anything is created.
     c.createEl("div", { cls: "setting-item-heading", text: "Preview" });
     const table = c.createEl("table", { cls: "gridsense-import-preview" });
@@ -144,12 +180,15 @@ export class PasteImportModal extends Modal {
     this.props.forEach((p, i) => {
       if (i !== this.nameCol && p) head.createEl("th", { text: p });
     });
+    for (const col of this.extraCols) if (col.name) head.createEl("th", { text: col.name });
     for (const row of body.slice(0, 5)) {
       const tr = table.createEl("tr");
       tr.createEl("td", { text: this.safeName(row[this.nameCol] ?? "") || "⚠ no name" });
       this.props.forEach((p, i) => {
         if (i !== this.nameCol && p) tr.createEl("td", { text: (row[i] ?? "").slice(0, 40) });
       });
+      for (const col of this.extraCols)
+        if (col.name) tr.createEl("td", { cls: "gridsense-import-helper", text: col.value });
     }
     if (body.length > 5)
       c.createDiv({ cls: "gridsense-props-hint", text: `…and ${body.length - 5} more rows.` });
@@ -240,6 +279,14 @@ export class PasteImportModal extends Modal {
             if (raw === "") return;
             fm[p] = parseInput(raw, undefined);
           });
+          // Helper columns last, and only where the paste left the key unset —
+          // so a helper named like a mapped column never blanks imported data.
+          for (const col of this.extraCols) {
+            if (!col.name || col.name in fm) continue;
+            const v = col.value.trim();
+            // Empty default → write "" so the key (and its grid column) exists.
+            fm[col.name] = v === "" ? "" : parseInput(v, undefined);
+          }
         });
         made++;
       } catch {
