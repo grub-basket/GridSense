@@ -1031,3 +1031,10 @@ tfoot .gridsense-draft td {
   color: var(--text-muted);
   font-style: italic;
 }
+
+/* Shared autocomplete (src/suggest.ts): a secondary line, e.g. the full path
+   when two notes share a name. */
+.gridsense-suggest-detail {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}

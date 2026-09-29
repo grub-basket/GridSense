@@ -5,6 +5,15 @@ import { ZoomValueModal } from "./zoom";
 import { FormulaBuilderModal } from "./formula-builder";
 import { evaluateFormulas } from "./formulas";
 import { Row } from "./types";
+import {
+  FieldSuggest,
+  listSpan,
+  markdownFilesIn,
+  otherListItems,
+  propertyKeyItems,
+  tagItems,
+  valueItemsFor,
+} from "./suggest";
 
 interface PropRow {
   key: string;
@@ -51,6 +60,12 @@ export function iconForWidget(widget: string | null): string {
 }
 
 const LIST_WIDGETS = new Set(["multitext", "tags", "aliases"]);
+
+/** Is `key` typed as a list (tags, aliases, cssclasses, or a List property)? */
+export function isListKey(app: App, key: string): boolean {
+  const widget = widgetForKey(app, key);
+  return !!widget && LIST_WIDGETS.has(widget);
+}
 
 /** Effective widget for a property: reserved names beat vault-assigned type. */
 export function widgetForKey(app: App, key: string): string | null {
@@ -530,6 +545,23 @@ export class PropsEditor {
       if (this.cell === "key") void this.renameKey(row, text).then(done);
       else void this.setValue(row, input.value).then(done);
     };
+    // Keys: every property in the vault (minus the ones this note already
+    // has). Values: what this key holds elsewhere; lists complete the item
+    // under the caret. A plain Enter still commits what you typed.
+    if (this.cell === "key") {
+      const taken = () => this.rows.map((r) => r.key).filter((k) => k && k !== row.key);
+      new FieldSuggest(this.app, input, () => propertyKeyItems(this.app), {
+        exclude: taken,
+        plainEnter: () => finish(true),
+      });
+    } else {
+      const list = Array.isArray(row.value) || isListKey(this.app, row.key);
+      new FieldSuggest(this.app, input, () => this.itemsFor(row.key), {
+        span: list ? listSpan : undefined,
+        exclude: list ? () => otherListItems(input.value, input.selectionStart ?? input.value.length) : undefined,
+        plainEnter: () => finish(true),
+      });
+    }
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
@@ -591,6 +623,11 @@ export class PropsEditor {
         void finish(false);
       }
     });
+    new FieldSuggest(this.app, input, () => this.itemsFor(row.key), {
+      // The other items in this list aren't worth suggesting again.
+      exclude: () => (Array.isArray(row.value) ? row.value.filter((_, i) => i !== idx).map((v) => valueToDisplay(v)) : []),
+      plainEnter: () => void finish(true),
+    });
     input.addEventListener("blur", () => void finish(true));
     input.focus();
     input.select();
@@ -628,8 +665,23 @@ export class PropsEditor {
         void finish(false);
       }
     });
+    new FieldSuggest(this.app, input, () => this.itemsFor(row.key), {
+      exclude: () => (Array.isArray(row.value) ? row.value.map((v) => valueToDisplay(v)) : []),
+      plainEnter: () => void finish(true),
+    });
     input.addEventListener("blur", () => void finish(true));
     input.focus();
+  }
+
+  /**
+   * Value suggestions for a key: what sibling notes (same folder) use first,
+   * then the rest of the vault. Tags-typed keys offer the vault's tags.
+   */
+  private itemsFor(key: string): string[] {
+    if (this.widgetFor(key) === "tags") return tagItems(this.app, false);
+    const folder = this.parentFolder();
+    // The vault root's "siblings" are the whole vault — skip the double scan.
+    return valueItemsFor(this.app, key, folder ? markdownFilesIn(this.app, folder) : undefined);
   }
 
   /** Reorder one item within a list (drag between chips). */

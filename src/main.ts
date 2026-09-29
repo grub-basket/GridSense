@@ -1,4 +1,5 @@
 import { FuzzySuggestModal, Notice, Plugin, PluginSettingTab, Setting, TFile, TFolder } from "obsidian";
+import { FieldSuggest, filePathItems, folderItems, propertyKeyItems } from "./suggest";
 import { GRID_VIEW_TYPE, GridView } from "./grid-view";
 import { NotePropsModal } from "./note-props";
 import { warnStashpadMissing } from "./stashpad-links";
@@ -266,7 +267,9 @@ export default class GridSensePlugin extends Plugin {
 
   /** Property names seen anywhere in the vault (import/column mapping). */
   knownPropertyNames(): string[] {
-    const out = new Set<string>();
+    // Public scan first (always works), then Obsidian's property registry for
+    // keys whose notes aren't cached yet — behind a guard, it's undocumented.
+    const out = new Set<string>(propertyKeyItems(this.app));
     try {
       const mtm = (
         this.app as unknown as {
@@ -364,6 +367,7 @@ class GridSenseSettingTab extends PluginSettingTab {
         .addText((t) => {
           t.setPlaceholder("gridsense-config.json");
           t.setValue(this.plugin.settings.configFilePath);
+          new FieldSuggest(this.app, t.inputEl, () => filePathItems(this.app, ["json"]));
           t.onChange(async (v) => {
             this.plugin.settings.configFilePath = v.trim() || "gridsense-config.json";
             await this.plugin.saveSettings();
@@ -421,6 +425,7 @@ class GridSenseSettingTab extends PluginSettingTab {
       .addText((t) => {
         t.setPlaceholder("GridSense Trash");
         t.setValue(this.plugin.settings.trashFolder);
+        new FieldSuggest(this.app, t.inputEl, () => folderItems(this.app).filter((f) => f.value !== ""));
         t.onChange(async (v) => {
           this.plugin.settings.trashFolder = v.trim() || "GridSense Trash";
           await this.plugin.saveSettings();

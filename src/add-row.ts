@@ -1,6 +1,5 @@
 import { Modal, Notice, TFile } from "obsidian";
 import type { GridView } from "./grid-view";
-import { ListSuggest } from "./formula-builder";
 
 /**
  * "Add row" — a full-note-in-one-go form, for when the inline draft row at the
@@ -67,7 +66,14 @@ export class AddRowModal extends Modal {
         input.addEventListener("input", () => {
           this.values[key] = input.value;
         });
-        new ListSuggest(this.app, input, () => this.view.distinctValues(key));
+        // Values this column already uses (grid first, then vault). The list
+        // shows on focus; a plain Enter still submits the form — arrow into
+        // the list to pick instead. (Before, an Enter on a focused empty
+        // field filled in the list's first value rather than submitting.)
+        this.view.attachValueSuggest(input, key, {
+          openOnEmpty: true,
+          onEnter: () => void this.submit(false),
+        });
         input.addEventListener("keydown", (e) => {
           if (e.key === "Enter") {
             e.preventDefault();

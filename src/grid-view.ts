@@ -45,6 +45,16 @@ import { META_COLUMNS, isMetaDate, metaColumn, metaDisplay, metaRaw } from "./fi
 import { openInStashpad, stashpadTargetFor } from "./stashpad-links";
 import { parseClipboardTable } from "./import";
 import { iconForWidget, widgetForKey } from "./props-editor";
+import {
+  FieldSuggest,
+  Span,
+  folderItems,
+  listSpan,
+  noteNameItems,
+  otherListItems,
+  valueItemsFor,
+  wikilinkSpan,
+} from "./suggest";
 import { TOOLBOX_TOOLS, addToolboxMenu, toolboxInstalled } from "./toolbox";
 import {
   ConfirmModal,
@@ -869,6 +879,9 @@ export class GridView extends ItemView {
       input.addEventListener("input", () => {
         state[key] = input.value;
       });
+      // Values this column already uses (the name cell is a new note: free text).
+      if (c.kind !== "file")
+        this.attachValueSuggest(input, key, { onEnter: () => void this.commitDraft(which) });
       input.addEventListener("keydown", (e) => {
         e.stopPropagation();
         if (e.key === "Enter") {
@@ -1024,6 +1037,46 @@ export class GridView extends ItemView {
       }
     }
     return [...seen].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  }
+
+  /**
+   * Autocomplete for a value typed into property `key`: what this grid's
+   * notes use first (most frequent first), then the rest of the vault.
+   * `list` completes only the comma-separated item under the caret; `links`
+   * switches to note names after an unclosed "[[". With `onEnter`, a plain
+   * Enter keeps the typed text and runs the field's own Enter action.
+   */
+  attachValueSuggest(
+    input: HTMLInputElement,
+    key: string,
+    o: { onEnter?: (e: KeyboardEvent) => void; links?: boolean; list?: boolean; openOnEmpty?: boolean } = {}
+  ): FieldSuggest {
+    const list = o.list ?? false;
+    const whole = (v: string): Span => ({ from: 0, to: v.length, query: v });
+    return new FieldSuggest(
+      this.app,
+      input,
+      (kind) =>
+        kind === "link"
+          ? noteNameItems(this.app)
+          : valueItemsFor(this.app, key, this.gridFiles()),
+      {
+        // Links open straight after "[["; values wait for a keystroke so a
+        // fast Enter-Enter-Enter run through cells isn't shadowed by a list.
+        openOnEmpty: (span) => span.kind === "link" || !!o.openOnEmpty,
+        span: (v, caret) =>
+          (o.links ? wikilinkSpan(v, caret) : null) ?? (list ? listSpan(v, caret) : whole(v)),
+        insert: (item, span) => (span.kind === "link" ? `[[${item.value}]]` : item.value),
+        exclude: list ? () => otherListItems(input.value, input.selectionStart ?? input.value.length) : undefined,
+        plainEnter: o.onEnter,
+        guardEnter: (span) => span.kind !== "link",
+      }
+    );
+  }
+
+  /** The notes this grid shows (before filters) — ranks value suggestions. */
+  gridFiles(): TFile[] {
+    return (this.store?.rows ?? []).map((r) => r.file);
   }
 
   /** Open the Add row form. Seeded from the selected row when there is one. */
@@ -1626,19 +1679,6 @@ export class GridView extends ItemView {
     td.empty();
     const input = td.createEl("input", { cls: "gridsense-editor", type: "text" });
     input.value = seed !== undefined ? seed : current;
-    // Wikilink autocomplete: suggests note names once you type "[[".
-    new ListSuggest(this.app, input, () => {
-      const m = /\[\[([^\]]*)$/.exec(input.value);
-      if (!m) return [];
-      const typed = m[1].toLowerCase();
-      return this.app.vault
-        .getMarkdownFiles()
-        .map((f) => f.basename)
-        .filter((n) => !typed || n.toLowerCase().includes(typed))
-        .sort()
-        .slice(0, 50)
-        .map((n) => normalizeWikiBrackets(input.value.replace(/\[\[[^\]]*$/, `[[${n}]]`)));
-    });
     // Live guard while typing: [[[ → [[ as you go.
     input.addEventListener("input", () => {
       const fixed = normalizeWikiBrackets(input.value);
@@ -1674,6 +1714,14 @@ export class GridView extends ItemView {
       this.flushPendingRefresh();
     };
     this.commitEdit = () => finish(true);
+    // Autocomplete: values this column already uses, and note names after
+    // "[[". Enter still commits what you typed unless you arrowed into the
+    // list first (Enter after "[[" picks the link, as before).
+    this.attachValueSuggest(input, c.key, {
+      links: true,
+      list: Array.isArray(this.cellValue(ri, ci)),
+      onEnter: (e) => finish(true, { dr: e.shiftKey ? -1 : 1, dc: 0 }),
+    });
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
@@ -2681,13 +2729,18 @@ class FindReplaceModal extends Modal {
           if (hit) this.searchScope = hit.id;
         });
       });
+    // With a single column in scope, both fields offer that column's values.
+    const scopedValues = () =>
+      this.searchScope.startsWith("col:") ? this.view.distinctValues(this.searchScope.slice(4)) : [];
     new Setting(this.contentEl).setName("Find").addText((t) => {
       t.onChange((v) => (this.find = v));
+      new FieldSuggest(this.app, t.inputEl, scopedValues, { openOnEmpty: false });
       window.setTimeout(() => t.inputEl.focus(), 0);
     });
-    new Setting(this.contentEl).setName("Replace with").addText((t) =>
-      t.onChange((v) => (this.replace = v))
-    );
+    new Setting(this.contentEl).setName("Replace with").addText((t) => {
+      t.onChange((v) => (this.replace = v));
+      new FieldSuggest(this.app, t.inputEl, scopedValues, { openOnEmpty: false });
+    });
     new Setting(this.contentEl)
       .setName("Match case")
       .addToggle((t) => t.setValue(false).onChange((v) => (this.matchCase = v)));
@@ -2795,6 +2848,8 @@ class ColumnsModal extends Modal {
       .setName("Save current as view")
       .addText((t) => {
         t.setPlaceholder("view name");
+        // Existing names, for overwriting one in place.
+        new FieldSuggest(this.view.app, t.inputEl, () => names, { openOnEmpty: false });
         t.onChange((v) => (viewName = v));
       })
       .addButton((b) =>
@@ -3121,6 +3176,13 @@ class FiltersModal extends Modal {
         .addText((t) => {
           t.setPlaceholder("value");
           t.setValue(cond.value);
+          // Values for the property picked on the left (folders for file.folder).
+          new FieldSuggest(this.view.app, t.inputEl, () => {
+            const prop = cond.prop.trim();
+            if (prop === "file.folder") return folderItems(this.view.app);
+            if (prop.startsWith("file.")) return [];
+            return valueItemsFor(this.view.app, prop, this.view.gridFiles());
+          });
           t.onChange(async (v) => {
             cond.value = v;
             await this.view.filtersChanged();
@@ -3188,11 +3250,19 @@ class SaveViewModal extends Modal {
         t.setPlaceholder("e.g. Triage");
         t.onChange((v) => (value = v));
         window.setTimeout(() => t.inputEl.focus(), 0);
+        const save = () => {
+          if (!value.trim()) return;
+          this.close();
+          void this.view.saveView(value.trim());
+        };
+        // Existing view names (to overwrite one). A plain Enter saves what you
+        // typed; arrow into the list to pick a name instead.
+        new FieldSuggest(this.app, t.inputEl, () => Object.keys(this.view.plugin.folderConfig(this.view.scopeFolder()).views ?? {}).sort(), {
+          openOnEmpty: false,
+          plainEnter: save,
+        });
         t.inputEl.addEventListener("keydown", (e) => {
-          if (e.key === "Enter" && value.trim()) {
-            this.close();
-            void this.view.saveView(value.trim());
-          }
+          if (e.key === "Enter") save();
         });
       });
     new Setting(this.contentEl).addButton((b) =>
@@ -3337,6 +3407,7 @@ class HeadingPickModal extends Modal {
       .setDesc("Shows each note's content under this heading as a read-only column")
       .addText((t) => {
         t.setPlaceholder(this.options[0] ?? "Notes");
+        new FieldSuggest(this.app, t.inputEl, () => this.options);
         t.onChange((v) => (value = v));
         window.setTimeout(() => t.inputEl.focus(), 0);
       });

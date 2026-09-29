@@ -1,37 +1,12 @@
-import { AbstractInputSuggest, App, Modal, Notice, Setting, TFile, TFolder } from "obsidian";
+import { App, Modal, Notice, Setting, TFile, TFolder } from "obsidian";
+import { ListSuggest, markdownFilesIn, propertyValueItems } from "./suggest";
 import type GridSensePlugin from "./main";
 import { Condition, FormulaSpec } from "./types";
-import { valueToDisplay } from "./edits";
 import { allHeadings } from "./headings";
 
-/** Generic type-to-filter suggest over a dynamic string list. */
-export class ListSuggest extends AbstractInputSuggest<string> {
-  constructor(
-    app: App,
-    private inputEl: HTMLInputElement,
-    private itemsFn: () => string[]
-  ) {
-    super(app, inputEl);
-    this.limit = 0;
-  }
-
-  getSuggestions(query: string): string[] {
-    const q = query.trim().toLowerCase();
-    const items = this.itemsFn();
-    if (!q || items.some((i) => i.toLowerCase() === q)) return items;
-    return items.filter((i) => i.toLowerCase().includes(q));
-  }
-
-  renderSuggestion(item: string, el: HTMLElement): void {
-    el.setText(item);
-  }
-
-  selectSuggestion(item: string): void {
-    this.inputEl.value = item;
-    this.inputEl.dispatchEvent(new Event("input"));
-    this.close();
-  }
-}
+// The shared autocomplete lives in ./suggest; re-exported so older imports
+// (`import { ListSuggest } from "./formula-builder"`) keep working.
+export { ListSuggest };
 
 export function allFolderPaths(app: App): string[] {
   const out: string[] = [];
@@ -109,6 +84,9 @@ export class FormulaBuilderModal extends Modal {
       .setDesc("Also the default lookup property")
       .addText((t) => {
         t.setValue(this.spec.name);
+        // The name doubles as the default lookup property, so offer this
+        // grid's properties — but only once you type (the field autofocuses).
+        new ListSuggest(app, t.inputEl, () => propsInDir(app, this.folder), { openOnEmpty: false });
         t.onChange((v) => (this.spec.name = v.trim()));
         window.setTimeout(() => t.inputEl.focus(), 0);
       });
@@ -182,16 +160,9 @@ export class FormulaBuilderModal extends Modal {
     new Setting(c).setName("If not found").addText((t) => {
       t.setValue(this.spec.notFound);
       t.setPlaceholder("(empty)");
-      new ListSuggest(app, t.inputEl, () => {
-        const prop = this.spec.returnProp;
-        if (!prop) return [];
-        const vals = new Set<string>();
-        for (const f of filesInDir(app, this.spec.searchDir)) {
-          const v = app.metadataCache.getFileCache(f)?.frontmatter?.[prop];
-          if (v !== undefined && v !== null) vals.add(valueToDisplay(v));
-        }
-        return [...vals].sort().slice(0, 200);
-      });
+      new ListSuggest(app, t.inputEl, () =>
+        propertyValueItems(app, this.spec.returnProp ?? "", markdownFilesIn(app, this.spec.searchDir)).slice(0, 200)
+      );
       t.onChange((v) => (this.spec.notFound = v));
     });
 
@@ -320,6 +291,18 @@ export class FormulaBuilderModal extends Modal {
           .addText((t) => {
             t.setPlaceholder("value");
             t.setValue(cond.value);
+            // Values the chosen property already holds, in the notes this
+            // formula scans (COUNTIF/SUMIF may point elsewhere).
+            new ListSuggest(app, t.inputEl, () =>
+              propertyValueItems(
+                app,
+                cond.prop,
+                markdownFilesIn(
+                  app,
+                  (type === "countif" || type === "sumif") && this.spec.countDir ? this.spec.countDir : this.folder
+                )
+              )
+            );
             t.onChange((v) => (cond.value = v));
           });
         if (type === "ifs")

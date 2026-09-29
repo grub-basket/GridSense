@@ -3,6 +3,7 @@ import { ColumnFilter, ColumnSpec, Condition, Row, SortDir, colId } from "./type
 import { valueToDisplay } from "./edits";
 import { matchesDate, matchesText } from "./formulas";
 import { isMetaDate, metaDisplay, metaRaw, parseDateOperand } from "./file-meta";
+import { FieldSuggest } from "./suggest";
 
 /**
  * Excel-style per-column filtering: the value extraction, the predicate, and
@@ -139,7 +140,10 @@ export class ColumnFilterPopover {
     this.build();
     this.place();
     const onDown = (e: MouseEvent) => {
-      if (!this.el.contains(e.target as Node) && !o.anchor.contains(e.target as Node)) this.close();
+      const t = e.target as Node;
+      // Picking from the value field's autocomplete list isn't an outside click.
+      const inSuggest = t.instanceOf(HTMLElement) && !!t.closest(".suggestion-container");
+      if (!this.el.contains(t) && !o.anchor.contains(t) && !inSuggest) this.close();
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -244,6 +248,13 @@ export class ColumnFilterPopover {
       attr: { placeholder: "value" },
     });
     val.value = this.filter.cond?.value ?? "";
+    // The column's own values, most common first (the same set the checkbox
+    // list shows). Not for date operators — those take a date or a count.
+    new FieldSuggest(this.o.app, val, () =>
+      DATE_OPS.some((d) => d.id === sel.value)
+        ? []
+        : [...this.o.distinct].sort((a, b) => b.count - a.count).map((d) => d.text)
+    );
     const syncCond = () => {
       const op = sel.value as Condition["op"] | "";
       val.toggleClass("is-hidden", op === "" || op === "empty" || op === "not-empty");

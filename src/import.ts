@@ -1,6 +1,7 @@
 import { App, Modal, Notice, Setting, TFile, TFolder, normalizePath } from "obsidian";
 import type GridSensePlugin from "./main";
 import { ListSuggest, allFolderPaths } from "./formula-builder";
+import { propertyValueItems } from "./suggest";
 import { parseInput } from "./edits";
 
 /**
@@ -156,6 +157,8 @@ export class PasteImportModal extends Modal {
         })
         .addText((t) => {
           t.setValue(col.value).setPlaceholder("default value (optional)");
+          // Values that property already has across the vault.
+          new ListSuggest(this.app, t.inputEl, () => propertyValueItems(this.app, col.name));
           t.onChange((v) => (col.value = v));
         })
         .addExtraButton((b) =>
