@@ -83,6 +83,18 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Build main.js from source with the committed pnpm-lock.yaml, so the
+      # uploaded asset is exactly what the store's build verification reproduces
+      # (pnpm install --frozen-lockfile && pnpm run build). Fails the release if
+      # the lockfile has drifted from package.json. pnpm-workspace.yaml's
+      # allowBuilds entry lets esbuild fetch its native binary on pnpm 11+.
+      - name: Build plugin
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          npm install -g pnpm
+          pnpm install --frozen-lockfile
+          pnpm run build
+
       - name: Generate release notes
         if: steps.check.outputs.exists == 'false'
         id: notes
