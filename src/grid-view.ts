@@ -56,6 +56,7 @@ import {
   wikilinkSpan,
 } from "./suggest";
 import { TOOLBOX_TOOLS, addToolboxMenu, toolboxInstalled } from "./toolbox";
+import { ReorderPropertiesModal } from "./reorder-modal";
 import {
   ConfirmModal,
   FormulaBuilderModal,
@@ -333,6 +334,11 @@ export class GridView extends ItemView {
       this.openAddRow()
     );
     mkBtn("⇥ column", "Jump to a column (⌘/Ctrl+G)", () => new JumpToColumnModal(this).open());
+    mkBtn(
+      "↕ key order",
+      "Reorder properties in notes — write this grid's column order (or a saved order) into the notes' frontmatter",
+      () => this.openReorderProperties()
+    );
     mkBtn("⛃ filters", "Stack property conditions (like Bases filters)", () =>
       new FiltersModal(this).open()
     );
@@ -1475,6 +1481,12 @@ export class GridView extends ItemView {
         new ColumnWidthModal(this, c).open();
       })
     );
+    menu.addItem((i) =>
+      i
+        .setTitle("Apply column order to notes…")
+        .setIcon("arrow-down-up")
+        .onClick(() => this.openReorderProperties())
+    );
     addToolboxMenu(this.app, menu, { perColumn: true });
     menu.addSeparator();
     menu.addItem((i) =>
@@ -2337,6 +2349,25 @@ export class GridView extends ItemView {
     return this.folder;
   }
 
+  /**
+   * "Reorder properties" scoped to this grid: its folder's notes (same
+   * subfolder rule as the grid), seeded from the current column order —
+   * frontmatter columns only (file, meta, heading and formula columns are
+   * computed, not keys in the note) — and on this grid's undo stack.
+   */
+  openReorderProperties() {
+    const store = this.store;
+    const seed = this.cols.length
+      ? this.cols.filter((c) => c.kind === "prop").map((c) => c.key)
+      : (store?.propColumns ?? []).filter((k) => !this.cfg().hidden.includes(k));
+    new ReorderPropertiesModal(this.app, this.plugin, {
+      folder: this.folder,
+      folderFiles: () => store?.files() ?? [],
+      seed,
+      engine: this.engine,
+    }).open();
+  }
+
   refresh(): Promise<void> {
     return this.render();
   }
@@ -2876,6 +2907,15 @@ class ColumnsModal extends Modal {
           .onClick(async () => {
             await this.view.resetColumnOrder();
             this.renderBody();
+          })
+      )
+      .addButton((b) =>
+        b
+          .setButtonText("Apply to notes…")
+          .setTooltip("Reorder the notes' frontmatter to match this column order")
+          .onClick(() => {
+            this.close();
+            this.view.openReorderProperties();
           })
       );
     new Setting(c).addButton((b) =>

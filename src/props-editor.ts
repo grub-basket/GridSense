@@ -5,6 +5,7 @@ import { ZoomValueModal } from "./zoom";
 import { FormulaBuilderModal } from "./formula-builder";
 import { evaluateFormulas } from "./formulas";
 import { Row } from "./types";
+import { writeKeyOrder } from "./property-order";
 import {
   FieldSuggest,
   listSpan,
@@ -724,19 +725,11 @@ export class PropsEditor {
     const after = keys.slice();
     const [moved] = after.splice(from, 1);
     after.splice(to, 0, moved);
+    // Shared with the bulk "Reorder properties" tool: anything added behind
+    // our back (another plugin, a sync) keeps its value and lands after the
+    // keys we know about, rather than vanishing.
     const write = async (order: string[]) => {
-      await this.app.fileManager.processFrontMatter(
-        this.file,
-        (fm: Record<string, unknown>) => {
-          const kept: [string, unknown][] = [];
-          for (const k of order) if (k in fm) kept.push([k, fm[k]]);
-          // Anything added behind our back (another plugin, a sync) keeps its
-          // value and lands after the keys we know about, rather than vanishing.
-          for (const k of Object.keys(fm)) if (!order.includes(k)) kept.push([k, fm[k]]);
-          for (const k of Object.keys(fm)) delete fm[k];
-          for (const [k, v] of kept) fm[k] = v;
-        }
-      );
+      await writeKeyOrder(this.app, this.file, order);
       this.load();
     };
     await write(after);

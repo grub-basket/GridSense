@@ -10,12 +10,23 @@ import { GridTrash } from "./trash";
 import { PasteImportModal } from "./import";
 import { DiagnoseModal } from "./diagnose";
 import { ConfirmModal } from "./formula-builder";
+import { ReorderPropertiesModal } from "./reorder-modal";
+import { renderPropertyOrdersSettings } from "./property-order-settings";
+import { cleanKeyList } from "./property-order";
 
 export default class GridSensePlugin extends Plugin {
   settings: GridSenseSettings = DEFAULT_SETTINGS;
   inlineProps: InlinePropsManager | null = null;
   configFile: ConfigFileStore | null = null;
   trash: GridTrash | null = null;
+  /** The last bulk property reorder run WITHOUT a grid (a grid keeps its own
+   * on its ⌘Z stack), for the "Undo last property reorder" command. */
+  lastPropertyReorder: {
+    label: string;
+    undo: () => Promise<void>;
+    redo: () => Promise<void>;
+    undone: boolean;
+  } | null = null;
 
   async onload() {
     await this.loadSettings();
@@ -89,6 +100,22 @@ export default class GridSensePlugin extends Plugin {
     gridCmd("grid-jump-column", "Grid: jump to column…", (v) => v.commandJumpToColumn());
     gridCmd("grid-history", "Grid: edit history…", (v) => void v.commandHistory());
     gridCmd("grid-recompile", "Grid: recompile from notes", (v) => v.commandRecompile());
+
+    this.addCommand({
+      id: "reorder-properties",
+      name: "Reorder properties in notes",
+      callback: () => this.openReorderProperties(),
+    });
+    this.addCommand({
+      id: "undo-last-property-reorder",
+      name: "Undo last property reorder (run outside a grid)",
+      checkCallback: (checking) => {
+        const last = this.lastPropertyReorder;
+        if (!last || last.undone) return false;
+        if (!checking) void this.undoLastPropertyReorder();
+        return true;
+      },
+    });
 
     this.addCommand({
       id: "save-grid-file",
@@ -224,6 +251,25 @@ export default class GridSensePlugin extends Plugin {
     this.app.workspace.revealLeaf(leaf);
   }
 
+  /** Open "Reorder properties": scoped to the active grid when there is one. */
+  openReorderProperties() {
+    const view = this.app.workspace.getActiveViewOfType(GridView);
+    if (view) view.openReorderProperties();
+    else new ReorderPropertiesModal(this.app, this).open();
+  }
+
+  /** Undo `record` (a specific batch, from its Notice) or the latest one. */
+  async undoLastPropertyReorder(record?: NonNullable<GridSensePlugin["lastPropertyReorder"]>) {
+    const last = record ?? this.lastPropertyReorder;
+    if (!last || last.undone) {
+      new Notice("GridSense: no property reorder to undo");
+      return;
+    }
+    last.undone = true;
+    await last.undo();
+    new Notice(`GridSense: undid "${last.label}"`);
+  }
+
   folderConfig(folder: string): FolderConfig {
     let cfg = this.settings.folders[folder];
     if (!cfg) {
@@ -235,6 +281,21 @@ export default class GridSensePlugin extends Plugin {
 
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    // Fresh containers (DEFAULT_SETTINGS' arrays must never be shared) and
+    // tolerate hand-edited / older data.json.
+    const s = this.settings;
+    s.propertyOrders = Array.isArray(s.propertyOrders)
+      ? s.propertyOrders
+          .filter((p) => p && typeof p.name === "string" && p.name.trim() && Array.isArray(p.keys))
+          .map((p) => ({
+            name: p.name.trim(),
+            keys: cleanKeyList(p.keys),
+            unlisted: p.unlisted === "in-place" ? "in-place" : "after",
+          }))
+      : [];
+    if (s.propertyOrderUnlisted !== "in-place") s.propertyOrderUnlisted = "after";
+    if (typeof s.propertyOrdersExportPath !== "string" || !s.propertyOrdersExportPath.trim())
+      s.propertyOrdersExportPath = "property-orders.json";
   }
 
   async saveSettings() {
@@ -415,6 +476,8 @@ class GridSenseSettingTab extends PluginSettingTab {
           new Notice(`GridSense: cleared section overrides on ${n} grid${n === 1 ? "" : "s"}`);
         })
       );
+
+    renderPropertyOrdersSettings(this.containerEl, this.plugin, () => this.display());
 
     this.containerEl.createEl("div", { cls: "setting-item-heading", text: "Notes & grids" });
     new Setting(this.containerEl)

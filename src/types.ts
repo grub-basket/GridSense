@@ -1,4 +1,5 @@
 import { TFile } from "obsidian";
+import type { PropertyOrderPreset, UnlistedMode } from "./property-order";
 
 export type Scalar = string | number | boolean | null;
 export type FmValue = Scalar | Scalar[];
@@ -180,6 +181,12 @@ export interface GridSenseSettings {
   /** DEFAULT open/closed state of the columns-modal sections, vault-wide.
    *  Individual grids can override these (FolderConfig.sections). */
   columnsSectionDefaults?: Record<string, boolean>;
+  /** Saved, named property orders for "Reorder properties" (shared export format). */
+  propertyOrders: PropertyOrderPreset[];
+  /** Default for keys a property order doesn't list. */
+  propertyOrderUnlisted: UnlistedMode;
+  /** Vault path the "Property orders" export writes to. */
+  propertyOrdersExportPath: string;
 }
 
 export const DEFAULT_SETTINGS: GridSenseSettings = {
@@ -192,4 +199,7 @@ export const DEFAULT_SETTINGS: GridSenseSettings = {
   trashFolder: "GridSense Trash",
   inlinePropsOverrides: {},
   openStashpadNotes: false,
+  propertyOrders: [],
+  propertyOrderUnlisted: "after",
+  propertyOrdersExportPath: "property-orders.json",
 };
