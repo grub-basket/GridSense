@@ -2,6 +2,7 @@ import { App, Modal, Notice, Setting, TFile, setIcon } from "obsidian";
 import type GridSensePlugin from "./main";
 import type { EditEngine } from "./edits";
 import { ConfirmModal } from "./formula-builder";
+import { appendHistory } from "./history-log";
 import { FieldSuggest } from "./suggest";
 import {
   PropertyOrderPreset,
@@ -408,7 +409,7 @@ export class ReorderPropertiesModal extends Modal {
     }
     const run = async () => {
       this.close();
-      await runReorder(this.app, this.plugin, targets, keys, mode, this.opts.engine);
+      await runReorder(this.app, this.plugin, targets, keys, mode, this.opts.folder ?? "", this.opts.engine);
     };
     if (targets.length > CONFIRM_ABOVE)
       new ConfirmModal(
@@ -429,6 +430,8 @@ async function runReorder(
   targets: TFile[],
   keys: string[],
   mode: UnlistedMode,
+  /** History log to record it in: the open grid's folder, "" without one. */
+  folder: string,
   engine?: EditEngine
 ) {
   const notice = new Notice(`GridSense: reordering properties 0/${targets.length}…`, 0);
@@ -446,13 +449,24 @@ async function runReorder(
     const verb = side === "before" ? "undoing" : "redoing";
     const pn = new Notice(`GridSense: ${verb} property reorder 0/${changes.length}…`, 0);
     let missing: string[] = [];
+    let done: ReorderChange[] = [];
     try {
-      ({ missing } = await replayReorder(app, changes, side, (d, of) =>
+      ({ missing, done } = await replayReorder(app, changes, side, (d, of) =>
         pn.setMessage(`GridSense: ${verb} property reorder ${d}/${of}…`)
       ));
     } finally {
       pn.hide();
     }
+    // Logged like any other write, so the History list shows it and its own
+    // "undo this" can take it back after a restart. Only notes really rewritten.
+    const replayed = done;
+    if (replayed.length)
+      void appendHistory(app, folder, {
+        label: `${side === "before" ? "undo" : "redo"}: ${label}`,
+        when: Date.now(),
+        changes: [],
+        orders: replayed,
+      });
     if (missing.length)
       new Notice(
         `GridSense: ${missing.length} note${missing.length === 1 ? " was" : "s were"} renamed, moved or deleted since the reorder and ${missing.length === 1 ? "was" : "were"} skipped: ${missing.slice(0, 5).join(", ")}${missing.length > 5 ? "…" : ""}`,
@@ -470,6 +484,7 @@ async function runReorder(
     new Notice("GridSense: nothing needed reordering");
     return;
   }
+  void appendHistory(app, folder, { label, when: Date.now(), changes: [], orders: changes });
   if (engine) {
     // On the grid's own stack: ⌘Z / ⎌ undo there walks it back in one step.
     engine.pushUi(label, undo, redo);

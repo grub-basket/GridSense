@@ -13,6 +13,7 @@ import { ConfirmModal } from "./formula-builder";
 import { ReorderPropertiesModal } from "./reorder-modal";
 import { renderPropertyOrdersSettings } from "./property-order-settings";
 import { cleanKeyList } from "./property-order";
+import { HistoryLogModal, readHistory } from "./history-log";
 
 export default class GridSensePlugin extends Plugin {
   settings: GridSenseSettings = DEFAULT_SETTINGS;
@@ -114,6 +115,16 @@ export default class GridSensePlugin extends Plugin {
         if (!last || last.undone) return false;
         if (!checking) void this.undoLastPropertyReorder();
         return true;
+      },
+    });
+    // Reorders run without a grid are logged at the vault root; this is the
+    // way back to them (and their "undo this") after a restart.
+    this.addCommand({
+      id: "vault-history",
+      name: "Edit history for the vault root (incl. reorders run outside a grid)",
+      callback: async () => {
+        const entries = await readHistory(this.app, "");
+        new HistoryLogModal(this.app, "", entries).open();
       },
     });
 

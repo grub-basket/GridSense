@@ -728,17 +728,27 @@ export class PropsEditor {
     // Shared with the bulk "Reorder properties" tool: anything added behind
     // our back (another plugin, a sync) keeps its value and lands after the
     // keys we know about, rather than vanishing.
-    const write = async (order: string[]) => {
-      await writeKeyOrder(this.app, this.file, order);
+    const label = `reorder "${moved}"`;
+    // Each write also goes to the on-disk log, so the History list can undo
+    // it after the ⌘Z stack is gone.
+    const write = async (order: string[], logLabel: string) => {
+      const w = await writeKeyOrder(this.app, this.file, order);
+      if (w)
+        this.engine.log({
+          label: logLabel,
+          when: Date.now(),
+          changes: [],
+          orders: [{ path: this.file.path, ...w }],
+        });
       this.load();
     };
-    await write(after);
+    await write(after, label);
     this.sel = to;
     this.paint();
     this.engine.pushUi(
-      `reorder "${moved}"`,
-      () => write(before),
-      () => write(after)
+      label,
+      () => write(before, `undo: ${label}`),
+      () => write(after, `redo: ${label}`)
     );
   }
 

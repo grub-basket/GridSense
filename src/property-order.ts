@@ -1,4 +1,5 @@
 import { App, TFile } from "obsidian";
+import type { KeyOrderRecord } from "./types";
 
 /**
  * Frontmatter KEY ORDER: the shared core behind every "reorder properties"
@@ -75,20 +76,22 @@ export function cachedKeys(app: App, file: TFile): string[] {
  * reorder the cache can still show the old order, and an undo judged from it
  * would think "already done" and silently skip. The real keys are checked
  * inside processFrontMatter instead (Obsidian only writes when the text
- * actually changes). Returns the order written (null when unchanged).
+ * actually changes). Returns the note's real key order before and after,
+ * read inside the write (null when unchanged), so a history record never
+ * depends on a lagging cache.
  */
 export async function writeKeyOrder(
   app: App,
   file: TFile,
   order: string[]
-): Promise<string[] | null> {
-  let written: string[] | null = null;
+): Promise<{ before: string[]; after: string[] } | null> {
+  let written: { before: string[]; after: string[] } | null = null;
   await app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
     const current = Object.keys(fm);
     const next = arrange(current, order);
     if (sameKeyOrder(next, current)) return;
     rebuild(fm, next);
-    written = next;
+    written = { before: current, after: next };
   });
   return written;
 }
@@ -115,10 +118,34 @@ function rebuild(fm: Record<string, unknown>, next: string[]) {
 }
 
 /** One note that a reorder will (or did) change. */
-export interface ReorderChange {
-  path: string;
-  before: string[];
-  after: string[];
+export type ReorderChange = KeyOrderRecord;
+
+/**
+ * Put one note back to `target` order, but only if its keys (the ones
+ * `expected` names) are still in `expected` order — a later manual reorder
+ * is left alone. Judged inside processFrontMatter, like writeKeyOrder.
+ */
+export async function revertKeyOrder(
+  app: App,
+  file: TFile,
+  expected: string[],
+  target: string[]
+): Promise<"done" | "same" | "changed"> {
+  let outcome: "done" | "same" | "changed" = "same";
+  await app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
+    const current = Object.keys(fm);
+    const next = arrange(current, target);
+    // Already in the target order (undone before): nothing to do.
+    if (sameKeyOrder(next, current)) return;
+    const want = new Set(expected);
+    if (!sameKeyOrder(current.filter((k) => want.has(k)), expected.filter((k) => hasOwn(fm, k)))) {
+      outcome = "changed";
+      return;
+    }
+    rebuild(fm, next);
+    outcome = "done";
+  });
+  return outcome;
 }
 
 /** Which of `files` a reorder would change, judged from the metadata cache. */
@@ -182,15 +209,21 @@ export async function replayReorder(
   changes: ReorderChange[],
   side: "before" | "after",
   progress?: (done: number, of: number) => void
-): Promise<{ written: number; missing: string[] }> {
+): Promise<{ written: number; missing: string[]; done: ReorderChange[] }> {
   let written = 0;
   const missing: string[] = [];
+  // What each rewritten note really went from and to, for the history log.
+  const rewritten: ReorderChange[] = [];
   let done = 0;
   for (const c of changes) {
     const file = app.vault.getAbstractFileByPath(c.path);
     if (file instanceof TFile) {
       try {
-        if (await writeKeyOrder(app, file, c[side])) written++;
+        const w = await writeKeyOrder(app, file, c[side]);
+        if (w) {
+          written++;
+          rewritten.push({ path: c.path, ...w });
+        }
       } catch {
         // One unreadable note must not strand the rest of the batch.
         missing.push(c.path);
@@ -199,7 +232,7 @@ export async function replayReorder(
     progress?.(++done, changes.length);
     if (done % 25 === 0) await new Promise((r) => window.setTimeout(r, 0));
   }
-  return { written, missing };
+  return { written, missing, done: rewritten };
 }
 
 /** Key → number of `files` that have it, plus first-seen order for ties. */

@@ -37,10 +37,20 @@ export interface ChangeRecord {
   after: unknown;
 }
 
+/** One note's frontmatter key order before and after a property reorder. */
+export interface KeyOrderRecord {
+  path: string;
+  before: string[];
+  after: string[];
+}
+
 export interface HistoryEntry {
   label: string;
   when: number;
   changes: ChangeRecord[];
+  /** Property reorders: key order only, values untouched. Absent in logs
+   * written before 0.27.0. */
+  orders?: KeyOrderRecord[];
 }
 
 export type SortDir = "asc" | "desc";
